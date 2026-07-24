@@ -57,6 +57,8 @@ mcp:
   logging:
     format: console
     level: info
+  # When false, HTTP /mcp skips mandatory Bearer TokenReview (suitable behind private Ingress).
+  requireAuth: true
   serviceAccount:
     create: true
     name: ""

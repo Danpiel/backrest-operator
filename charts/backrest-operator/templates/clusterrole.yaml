@@ -92,6 +92,26 @@ rules:
   - apiGroups: [""]
     resources: ["users", "groups", "serviceaccounts"]
     verbs: ["impersonate"]
+  # When MCP_REQUIRE_AUTH=false, tools run as the MCP pod SA (no impersonation).
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters
+      - backuprepositories
+      - backupplans
+      - pvcbackups
+      - pvcrestores
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters/status
+      - backuprepositories/status
+      - backupplans/status
+      - pvcbackups/status
+      - pvcrestores/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
 {{- if .Values.rbac.userRoles.viewer.create }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

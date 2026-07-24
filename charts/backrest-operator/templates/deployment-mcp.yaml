@@ -51,6 +51,8 @@ spec:
               value: {{ .Values.mcp.logging.format | default "console" | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.mcp.logging.level | default "info" | quote }}
+            - name: MCP_REQUIRE_AUTH
+              value: {{ .Values.mcp.requireAuth | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

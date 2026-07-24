@@ -27,16 +27,26 @@ type callParams struct {
 }
 
 type Server struct {
-	Auth  *Auth
-	Tools *Tools
+	Auth           *Auth
+	Tools          *Tools
+	RequireAuth    bool
+	AnonymousUser  *UserIdentity
 }
 
-func NewServer(cfg *rest.Config, onDeny func(tool string)) (*Server, error) {
+func NewServer(cfg *rest.Config, onDeny func(tool string), requireAuth bool) (*Server, error) {
 	auth, err := NewAuth(cfg, onDeny)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{Auth: auth, Tools: NewTools(cfg)}, nil
+	return &Server{
+		Auth:        auth,
+		Tools:       NewTools(cfg),
+		RequireAuth: requireAuth,
+		AnonymousUser: &UserIdentity{
+			Username: StdioUsername,
+			Groups:   []string{"system:authenticated", "backrest:mcp-open"},
+		},
+	}, nil
 }
 
 func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte) (resp []byte, httpStatus int) {
@@ -143,11 +153,38 @@ func (s *Server) HTTPHandler() http.Handler {
 
 func (s *Server) resolveHTTPUser(r *http.Request) (*UserIdentity, error) {
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+	hasBearer := strings.HasPrefix(strings.ToLower(auth), "bearer ")
+	if !s.RequireAuth {
+		if hasBearer {
+			token := strings.TrimSpace(auth[7:])
+			if token != "" {
+				if user, err := s.Auth.ReviewToken(r.Context(), token); err == nil {
+					return user, nil
+				}
+			}
+		}
+		return s.AnonymousUser, nil
+	}
+	if !hasBearer {
 		return nil, fmt.Errorf("Bearer Kubernetes token required")
 	}
 	token := strings.TrimSpace(auth[7:])
 	return s.Auth.ReviewToken(r.Context(), token)
+}
+
+func envBool(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func (s *Server) RunStdio(ctx context.Context) error {

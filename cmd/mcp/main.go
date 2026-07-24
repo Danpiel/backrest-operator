@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -32,10 +33,12 @@ func main() {
 		mode        string
 		listenAddr  string
 		metricsAddr string
+		requireAuth bool
 	)
 	flag.StringVar(&mode, "mode", envOr("MCP_MODE", "http"), "http or stdio")
 	flag.StringVar(&listenAddr, "listen", envAddr("MCP_PORT", ":8081"), "HTTP listen address")
 	flag.StringVar(&metricsAddr, "metrics", envAddr("METRICS_PORT", ":8080"), "metrics listen address")
+	flag.BoolVar(&requireAuth, "require-auth", envBoolDefault("MCP_REQUIRE_AUTH", true), "require Kubernetes bearer TokenReview on HTTP /mcp (disable behind private Ingress)")
 	flag.Parse()
 
 	log := logging.Setup("mcp", logging.FromEnv())
@@ -43,6 +46,7 @@ func main() {
 		"mode", mode,
 		"listen", listenAddr,
 		"metrics", metricsAddr,
+		"requireAuth", requireAuth,
 		"logFormat", envOr("LOG_FORMAT", "console"),
 		"logLevel", envOr("LOG_LEVEL", "info"),
 	)
@@ -56,7 +60,7 @@ func main() {
 	srv, err := mcp.NewServer(cfg, func(tool string) {
 		authDenials.WithLabelValues(tool).Inc()
 		log.Info("auth denied", "tool", tool)
-	})
+	}, requireAuth)
 	if err != nil {
 		log.Error(err, "create MCP server")
 		os.Exit(1)
@@ -110,6 +114,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envBoolDefault(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func envAddr(key, def string) string {
