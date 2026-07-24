@@ -66,6 +66,8 @@ mcp:
     level: info
   # When false, HTTP /mcp skips mandatory Bearer TokenReview (suitable behind private Ingress).
   requireAuth: true
+  # Public base for Backrest signed download URLs (GetDownloadURL → /download/<jwt>/).
+  publicBaseURL: ""
   serviceAccount:
     create: true
     name: ""

@@ -53,6 +53,10 @@ spec:
               value: {{ .Values.mcp.logging.level | default "info" | quote }}
             - name: MCP_REQUIRE_AUTH
               value: {{ .Values.mcp.requireAuth | quote }}
+            {{- if .Values.mcp.publicBaseURL }}
+            - name: BACKREST_PUBLIC_BASE_URL
+              value: {{ .Values.mcp.publicBaseURL | quote }}
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

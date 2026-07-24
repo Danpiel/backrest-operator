@@ -200,6 +200,59 @@ func (c *Client) ListSnapshots(ctx context.Context, repoID, planID string) ([]ma
 	return out.Snapshots, nil
 }
 
+// GetOperations returns Backrest operation history matching the optional selector fields.
+func (c *Client) GetOperations(ctx context.Context, selector map[string]any, lastN int) ([]map[string]any, error) {
+	body := map[string]any{}
+	if selector != nil {
+		body["selector"] = selector
+	}
+	if lastN > 0 {
+		body["lastN"] = lastN
+	}
+	var out struct {
+		Operations []map[string]any `json:"operations"`
+	}
+	if err := c.post(ctx, "GetOperations", body, &out); err != nil {
+		return nil, err
+	}
+	return out.Operations, nil
+}
+
+// GetDownloadURL returns a relative signed download path (e.g. ./download/<jwt>/)
+// for an indexed snapshot operation. filePath "/" dumps the whole snapshot as .tar.
+func (c *Client) GetDownloadURL(ctx context.Context, opID int64, filePath string) (string, error) {
+	if filePath == "" {
+		filePath = "/"
+	}
+	var out struct {
+		Value string `json:"value"`
+	}
+	if err := c.post(ctx, "GetDownloadURL", map[string]any{
+		"opId":     opID,
+		"filePath": filePath,
+	}, &out); err != nil {
+		return "", err
+	}
+	if out.Value == "" {
+		return "", fmt.Errorf("empty download URL")
+	}
+	return out.Value, nil
+}
+
+// AbsoluteDownloadURL joins a Backrest relative ./download/... URL with a public base.
+func AbsoluteDownloadURL(publicBase, relative string) string {
+	base := strings.TrimRight(strings.TrimSpace(publicBase), "/")
+	rel := strings.TrimSpace(relative)
+	rel = strings.TrimPrefix(rel, "./")
+	if !strings.HasPrefix(rel, "/") {
+		rel = "/" + rel
+	}
+	if base == "" {
+		return rel
+	}
+	return base + rel
+}
+
 func (c *Client) ClearRepoHistory(ctx context.Context, repoID string) error {
 	return c.post(ctx, "ClearHistory", map[string]any{
 		"selector":   map[string]any{"repoId": repoID},

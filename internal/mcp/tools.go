@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -170,6 +172,8 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 		}, nil
 	case "list_snapshots":
 		return t.listSnapshots(ctx, dc, ns, args)
+	case "get_snapshot_download_url":
+		return t.getSnapshotDownloadURL(ctx, dc, ns, args)
 	case "get_host_config":
 		return t.getHostConfig(ctx, args)
 	case "index_repository":
@@ -215,6 +219,83 @@ func (t *Tools) listSnapshots(ctx context.Context, dc dynamic.Interface, ns stri
 		return nil, err
 	}
 	return map[string]interface{}{"repository": name, "planId": planID, "snapshots": snaps, "count": len(snaps)}, nil
+}
+
+func (t *Tools) getSnapshotDownloadURL(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	repo := strArg(args, "name", "")
+	snapID := strArg(args, "snapshot_id", "")
+	if repo == "" || snapID == "" {
+		return nil, fmt.Errorf("name and snapshot_id are required")
+	}
+	path := strArg(args, "path", "/")
+	planID := strArg(args, "plan_id", "")
+	publicBase := strArg(args, "public_base_url", "")
+	if publicBase == "" {
+		publicBase = strings.TrimSpace(os.Getenv("BACKREST_PUBLIC_BASE_URL"))
+	}
+	if publicBase == "" {
+		publicBase = "https://backup.prq-infra.net"
+	}
+	bc, _, err := t.hostClientFromArgs(ctx, dc, ns, args, repo)
+	if err != nil {
+		return nil, err
+	}
+	selector := map[string]any{"snapshotId": snapID}
+	if planID != "" {
+		selector["planId"] = planID
+	}
+	ops, err := bc.GetOperations(ctx, selector, 20)
+	if err != nil {
+		return nil, err
+	}
+	var opID int64
+	for _, op := range ops {
+		if _, ok := op["operationIndexSnapshot"]; !ok {
+			continue
+		}
+		opID = jsonNumberAsInt64(op["id"])
+		if opID > 0 {
+			break
+		}
+	}
+	if opID == 0 {
+		return nil, fmt.Errorf("no indexed snapshot operation for snapshot_id=%s (run index_repository first)", snapID)
+	}
+	rel, err := bc.GetDownloadURL(ctx, opID, path)
+	if err != nil {
+		return nil, err
+	}
+	abs := backrest.AbsoluteDownloadURL(publicBase, rel)
+	return map[string]interface{}{
+		"downloadURL":  abs,
+		"relativeURL":  rel,
+		"operationId":  opID,
+		"snapshotId":   snapID,
+		"path":         path,
+		"repository":   repo,
+		"contentType":  "application/octet-stream (.tar stream via restic dump)",
+		"note":         "Signed JWT URL from Backrest GetDownloadURL; streams without an export Job. Prefer curl -L -o backup.tar <url>.",
+	}, nil
+}
+
+func jsonNumberAsInt64(v interface{}) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	case string:
+		var i int64
+		_, _ = fmt.Sscan(n, &i)
+		return i
+	default:
+		return 0
+	}
 }
 
 func (t *Tools) getHostConfig(ctx context.Context, args map[string]interface{}) (interface{}, error) {
