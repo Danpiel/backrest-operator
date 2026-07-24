@@ -489,6 +489,9 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 	vols := []corev1.Volume{}
 	mounts := []corev1.VolumeMount{}
 	paths := b.Spec.Paths
+	if len(paths) == 1 && (paths[0] == "/" || paths[0] == "") {
+		paths = nil
+	}
 	if len(paths) == 0 {
 		paths = nil
 		for i, pvc := range pvcNames {
@@ -506,13 +509,17 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 	} else {
 		for i, pvc := range pvcNames {
 			volName := fmt.Sprintf("data-%d", i)
+			mount := paths[0]
+			if i < len(paths) {
+				mount = paths[i]
+			}
 			vols = append(vols, corev1.Volume{
 				Name: volName,
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc, ReadOnly: true},
 				},
 			})
-			mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: paths[min(i, len(paths)-1)], ReadOnly: true})
+			mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: mount, ReadOnly: true})
 		}
 	}
 
