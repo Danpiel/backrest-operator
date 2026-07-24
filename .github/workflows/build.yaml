@@ -19,20 +19,33 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags
+        id: meta
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          TAG="${{ github.ref_name }}"
+          if [ "$TAG" = "master" ] || [ "$TAG" = "main" ]; then TAG=latest; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then TAG=v0.1.0; fi
+          echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Build and push operator
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/backrest-operator:${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/backrest-operator:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/backrest-operator:latest
       - name: Build and push mcp
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.mcp
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/backrest-mcp:${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/backrest-mcp:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/backrest-mcp:latest
       - name: Package helm chart
         run: |
           mkdir -p dist

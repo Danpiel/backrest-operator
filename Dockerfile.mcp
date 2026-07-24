@@ -6,9 +6,11 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
-RUN pip install --no-cache-dir .
+RUN pip install --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir . \
+ && python -c "import backrest_operator, backrest_mcp, shared"
 
 USER 65532:65532
 EXPOSE 8080 8081
 ENV MCP_MODE=http
-ENTRYPOINT ["backrest-mcp"]
+ENTRYPOINT ["python", "-m", "backrest_mcp"]

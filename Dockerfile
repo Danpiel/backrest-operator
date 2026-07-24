@@ -6,9 +6,10 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
-RUN pip install --no-cache-dir . \
- && backrest-operator --help >/dev/null 2>&1 || true
+RUN pip install --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir . \
+ && python -c "import backrest_operator, backrest_mcp, shared"
 
 USER 65532:65532
 EXPOSE 8080 8081 9443
-ENTRYPOINT ["backrest-operator"]
+ENTRYPOINT ["python", "-m", "backrest_operator"]
