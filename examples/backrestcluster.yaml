@@ -18,6 +18,7 @@ spec:
       # annotations: {}
       # backendServiceName: backrest-oauth2-proxy
       # backendServicePort: 4180
+      # downloadBypass: { enabled: true, path: /download }  # default on when ingress.enabled
       # tls: []
     persistence:
       size: 20Gi

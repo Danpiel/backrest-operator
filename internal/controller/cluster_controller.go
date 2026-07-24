@@ -214,6 +214,7 @@ func (r *BackrestClusterReconciler) ensureIngress(ctx context.Context, c *operat
 	ingName := "backrest-host-" + c.Name
 	if !c.Spec.Host.Ingress.Enabled {
 		_ = r.Delete(ctx, &netv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: ingName, Namespace: c.Namespace}})
+		_ = r.Delete(ctx, &netv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: ingName + "-download", Namespace: c.Namespace}})
 		return nil
 	}
 	host := c.Spec.Host.Ingress.Host
@@ -244,6 +245,78 @@ func (r *BackrestClusterReconciler) ensureIngress(ctx context.Context, c *operat
 						Path: "/", PathType: &pathType,
 						Backend: netv1.IngressBackend{Service: &netv1.IngressServiceBackend{
 							Name: backendName, Port: netv1.ServiceBackendPort{Number: backendPort},
+						}},
+					}},
+				}},
+			}},
+		},
+	}
+	if c.Spec.Host.Ingress.ClassName != "" {
+		ing.Spec.IngressClassName = &c.Spec.Host.Ingress.ClassName
+	}
+	if len(c.Spec.Host.Ingress.TLS) > 0 {
+		b, err := jsonMarshal(c.Spec.Host.Ingress.TLS)
+		if err == nil {
+			var tls []netv1.IngressTLS
+			if jsonUnmarshal(b, &tls) == nil {
+				ing.Spec.TLS = tls
+			}
+		}
+	}
+	_ = controllerutil.SetControllerReference(c, ing, r.Scheme)
+	if err := r.createOrUpdateIngress(ctx, ing); err != nil {
+		return err
+	}
+	return r.ensureDownloadIngress(ctx, c, svcName, labels, host)
+}
+
+func (r *BackrestClusterReconciler) ensureDownloadIngress(ctx context.Context, c *operatorv1alpha1.BackrestCluster, svcName string, labels map[string]string, host string) error {
+	ingName := "backrest-host-" + c.Name + "-download"
+	bypass := c.Spec.Host.Ingress.DownloadBypass
+	enabled := c.Spec.Host.Ingress.Enabled
+	if bypass.Enabled != nil {
+		enabled = *bypass.Enabled && c.Spec.Host.Ingress.Enabled
+	}
+	if !enabled {
+		_ = r.Delete(ctx, &netv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: ingName, Namespace: c.Namespace}})
+		return nil
+	}
+	path := bypass.Path
+	if path == "" {
+		path = "/download"
+	}
+	pathType := netv1.PathTypePrefix
+	ann := map[string]string{}
+	for k, v := range c.Spec.Host.Ingress.Annotations {
+		ann[k] = v
+	}
+	// Prefer this path over a catch-all UI Ingress that fronts oauth2-proxy.
+	if _, ok := ann["traefik.ingress.kubernetes.io/router.priority"]; !ok {
+		ann["traefik.ingress.kubernetes.io/router.priority"] = "100"
+	}
+	for k, v := range bypass.Annotations {
+		ann[k] = v
+	}
+	dlLabels := map[string]string{}
+	for k, v := range labels {
+		dlLabels[k] = v
+	}
+	dlLabels["app.kubernetes.io/component"] = "download"
+	ing := &netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ingName,
+			Namespace:   c.Namespace,
+			Labels:      dlLabels,
+			Annotations: ann,
+		},
+		Spec: netv1.IngressSpec{
+			Rules: []netv1.IngressRule{{
+				Host: host,
+				IngressRuleValue: netv1.IngressRuleValue{HTTP: &netv1.HTTPIngressRuleValue{
+					Paths: []netv1.HTTPIngressPath{{
+						Path: path, PathType: &pathType,
+						Backend: netv1.IngressBackend{Service: &netv1.IngressServiceBackend{
+							Name: svcName, Port: netv1.ServiceBackendPort{Number: backrestPort},
 						}},
 					}},
 				}},

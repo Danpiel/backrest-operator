@@ -80,6 +80,22 @@ spec:
                         backendServicePort:
                           type: integer
                           format: int32
+                        downloadBypass:
+                          type: object
+                          description: >-
+                            Expose /download on the same host directly to the Backrest
+                            host Service (skip oauth2-proxy). Signed GetDownloadURL JWT
+                            is the credential. Defaults to enabled when ingress.enabled.
+                          properties:
+                            enabled:
+                              type: boolean
+                            path:
+                              type: string
+                              description: Path prefix (default /download).
+                            annotations:
+                              type: object
+                              additionalProperties:
+                                type: string
                         tls:
                           type: array
                           items:

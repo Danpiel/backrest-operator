@@ -135,13 +135,59 @@ kubectl apply -f examples/pvcrestore-existing.yaml
 kubectl get pvcrestore -n app -w
 ```
 
-### Export archive (curl / local download)
+### Download a snapshot as `.tar` (Backrest API — preferred)
 
-Creates a short-lived restore-proxy Job with a TTL-bound download URL:
+Backrest can stream a snapshot (or a path inside it) as a tar archive via its
+native **GetDownloadURL** API. No PVCRestore / export Job is required.
+
+When `BackrestCluster.spec.host.ingress` is enabled, the operator also creates a
+sibling Ingress `{host-ingress-name}-download` for path `/download` that points
+**directly** at the Backrest host Service (bypasses oauth2-proxy). The signed
+JWT in the URL is the credential.
+
+```bash
+# 1) Find the indexed-snapshot operation for your restic snapshot id
+HOST_POD=$(kubectl get pod -n backrest-system -l app.kubernetes.io/component=host -o jsonpath='{.items[0].metadata.name}')
+SNAP_ID='<full-restic-snapshot-id>'
+
+kubectl exec -n backrest-system "$HOST_POD" -- wget -qO- \
+  --post-data="{\"selector\":{\"snapshotId\":\"$SNAP_ID\"},\"lastN\":5}" \
+  --header='Content-Type: application/json' \
+  http://127.0.0.1:9898/v1.Backrest/GetOperations
+# Note the operation "id" where operationIndexSnapshot is set (e.g. "11").
+
+# 2) Mint a signed relative download URL (path "/" = whole snapshot as .tar)
+OP_ID=11
+kubectl exec -n backrest-system "$HOST_POD" -- wget -qO- \
+  --post-data="{\"opId\":$OP_ID,\"filePath\":\"/\"}" \
+  --header='Content-Type: application/json' \
+  http://127.0.0.1:9898/v1.Backrest/GetDownloadURL
+# → {"value":"./download/<jwt>/"}
+
+# 3) Download via the public UI host (operator download Ingress)
+curl -L -o snapshot.tar "https://<ingress-host>/download/<jwt>/"
+```
+
+Optional: set `path` to a subdirectory (e.g. `/data/...`) to dump only that tree.
+
+Disable the bypass Ingress if needed:
+
+```yaml
+spec:
+  host:
+    ingress:
+      downloadBypass:
+        enabled: false
+```
+
+### Export archive via PVCRestore (fallback)
+
+Creates a short-lived restore-proxy Job with a TTL-bound download URL (heavier
+than native GetDownloadURL — prefer the section above):
 
 ```bash
 kubectl apply -f examples/pvcrestore-export.yaml
-kubectl get pvcrestore export-restore -n app -o jsonpath='{.status.exportURL}'
+kubectl get pvcrestore export-restore -n app -o jsonpath='{.status.exportExternalURL}{.status.exportURL}'
 ```
 
 Export TTL must be between 60 and 86400 seconds (`spec.export.ttlSeconds`).

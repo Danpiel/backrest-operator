@@ -35,6 +35,19 @@ type BackrestIngressSpec struct {
 	BackendServiceName string `json:"backendServiceName,omitempty"`
 	// BackendServicePort defaults to the Backrest UI port when empty.
 	BackendServicePort int32 `json:"backendServicePort,omitempty"`
+	// DownloadBypass exposes /download on the same host directly to the Backrest
+	// host Service (skips oauth2-proxy). Signed JWT from GetDownloadURL is the auth.
+	// Defaults to enabled when parent ingress is enabled.
+	DownloadBypass BackrestDownloadBypassSpec `json:"downloadBypass,omitempty"`
+}
+
+type BackrestDownloadBypassSpec struct {
+	// Enabled defaults to true when host.ingress.enabled is true.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Path prefix served without the UI auth backend (default /download).
+	Path string `json:"path,omitempty"`
+	// Annotations merged onto the download Ingress (e.g. Traefik router priority).
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 type BackrestPersistenceSpec struct {
