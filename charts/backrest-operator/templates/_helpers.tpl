@@ -183,6 +183,5 @@ Watch namespaces env value
 {{- if .Values.operator.watch.namespaces }}
 {{- join "," .Values.operator.watch.namespaces }}
 {{- else }}
-*
 {{- end }}
 {{- end }}

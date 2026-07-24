@@ -22,6 +22,8 @@ def create_app() -> web.Application:
     app = web.Application()
     app.router.add_post("/validate", validate)
     app.router.add_post("/validate/{tail:.*}", validate)
+    # Match any admission path from ValidatingWebhookConfiguration
+    app.router.add_route("POST", "/{path:.*}", validate)
     app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
     return app
 

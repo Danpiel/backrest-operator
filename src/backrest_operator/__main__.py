@@ -30,6 +30,7 @@ def main() -> None:
 
     kopf.run(
         clusterwide=True,
+        standalone=True,
         liveness_endpoint="http://0.0.0.0:8081/healthz",
     )
 
