@@ -76,6 +76,13 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := os.Stat(file); err != nil {
+			http.Error(w, "archive not ready", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	})
 
 	log.Info("listening", "addr", addr, "path", "/<token>/archive.tar", "file", file, "oneshot", oneshot)
 	if err := http.ListenAndServe(addr, mux); err != nil {

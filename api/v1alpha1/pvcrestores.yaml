@@ -161,6 +161,9 @@ spec:
                 exportURL:
                   type: string
                   description: In-cluster URL for curl download (ClusterIP + token path).
+                exportExternalURL:
+                  type: string
+                  description: Public HTTPS download URL when EXPORT_PUBLIC_BASE_URL is configured.
                 exportExpiresAt:
                   type: string
                   format: date-time

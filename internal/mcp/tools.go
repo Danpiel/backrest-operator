@@ -151,36 +151,7 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 	case "get_pvc_restore":
 		return dc.Resource(gvrRestore).Namespace(ns).Get(ctx, strArg(args, "name", ""), metav1.GetOptions{})
 	case "restore_export":
-		repoNS := strArg(args, "repository_namespace", ns)
-		snapshotID := strArg(args, "snapshot_id", "latest")
-		ttl := intArg(args, "ttl_seconds", 3600)
-		pathFilters := stringSliceArg(args, "path_filters")
-		obj := &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "operator.backrest.io/v1alpha1",
-			"kind":       "PVCRestore",
-			"metadata": map[string]interface{}{
-				"generateName": "export-",
-				"namespace":    ns,
-			},
-			"spec": map[string]interface{}{
-				"mode": "export",
-				"repositoryRef": map[string]interface{}{
-					"name":      strArg(args, "repository_name", ""),
-					"namespace": repoNS,
-				},
-				"restic": map[string]interface{}{
-					"snapshotID":  snapshotID,
-					"pathFilters": pathFilters,
-				},
-				"export": map[string]interface{}{
-					"enabled":    true,
-					"ttlSeconds": ttl,
-					"oneShot":    true,
-					"format":     "tar",
-				},
-			},
-		}}
-		return dc.Resource(gvrRestore).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
+		return t.restoreExport(ctx, dc, ns, args)
 	case "repo_status":
 		obj, err := dc.Resource(gvrRepo).Namespace(ns).Get(ctx, strArg(args, "name", ""), metav1.GetOptions{})
 		if err != nil {
@@ -369,6 +340,94 @@ func stringSliceArg(args map[string]interface{}, key string) []string {
 		}
 	}
 	return out
+}
+
+func (t *Tools) restoreExport(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	repoNS := strArg(args, "repository_namespace", ns)
+	snapshotID := strArg(args, "snapshot_id", "latest")
+	ttl := intArg(args, "ttl_seconds", 3600)
+	waitSec := intArg(args, "wait_seconds", 120)
+	if waitSec < 5 {
+		waitSec = 5
+	}
+	pathFilters := stringSliceArg(args, "path_filters")
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "operator.backrest.io/v1alpha1",
+		"kind":       "PVCRestore",
+		"metadata": map[string]interface{}{
+			"generateName": "export-",
+			"namespace":    ns,
+		},
+		"spec": map[string]interface{}{
+			"mode": "export",
+			"repositoryRef": map[string]interface{}{
+				"name":      strArg(args, "repository_name", ""),
+				"namespace": repoNS,
+			},
+			"restic": map[string]interface{}{
+				"snapshotID":  snapshotID,
+				"pathFilters": pathFilters,
+			},
+			"export": map[string]interface{}{
+				"enabled":    true,
+				"ttlSeconds": ttl,
+				"oneShot":    true,
+				"format":     "tar",
+			},
+		},
+	}}
+	created, err := dc.Resource(gvrRestore).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	name := created.GetName()
+	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
+	var latest *unstructured.Unstructured
+	for {
+		latest, err = dc.Resource(gvrRestore).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		ext, _, _ := unstructured.NestedString(latest.Object, "status", "exportExternalURL")
+		inCluster, _, _ := unstructured.NestedString(latest.Object, "status", "exportURL")
+		phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
+		if ext != "" || inCluster != "" || phase == "Failed" || phase == "Succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	ext, _, _ := unstructured.NestedString(latest.Object, "status", "exportExternalURL")
+	inCluster, _, _ := unstructured.NestedString(latest.Object, "status", "exportURL")
+	expires, _, _ := unstructured.NestedString(latest.Object, "status", "exportExpiresAt")
+	phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
+	job, _, _ := unstructured.NestedString(latest.Object, "status", "lastJobName")
+	download := ext
+	if download == "" {
+		download = inCluster
+	}
+	out := map[string]interface{}{
+		"name":              name,
+		"namespace":         ns,
+		"phase":             phase,
+		"downloadURL":       download,
+		"exportExternalURL": ext,
+		"exportURL":         inCluster,
+		"exportExpiresAt":   expires,
+		"lastJobName":       job,
+		"snapshotID":        snapshotID,
+		"note":              "Archive becomes downloadable after restic restore finishes (HTTP 200 on the URL; /readyz returns ok). Full chain snapshots can be tens of GB.",
+	}
+	if download == "" {
+		return out, fmt.Errorf("export created as %s/%s but no download URL yet (phase=%s); retry get_pvc_restore", ns, name, phase)
+	}
+	return out, nil
 }
 
 // IsNotFound reports whether err is a Kubernetes not-found error.

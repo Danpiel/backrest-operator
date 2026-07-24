@@ -37,11 +37,12 @@ type ExportSpec struct {
 }
 
 type PVCRestoreStatus struct {
-	Phase           string      `json:"phase,omitempty"`
-	ExportURL       string      `json:"exportURL,omitempty"`
-	ExportExpiresAt string      `json:"exportExpiresAt,omitempty"`
-	LastJobName     string      `json:"lastJobName,omitempty"`
-	Conditions      []Condition `json:"conditions,omitempty"`
+	Phase             string      `json:"phase,omitempty"`
+	ExportURL         string      `json:"exportURL,omitempty"`
+	ExportExternalURL string      `json:"exportExternalURL,omitempty"`
+	ExportExpiresAt   string      `json:"exportExpiresAt,omitempty"`
+	LastJobName       string      `json:"lastJobName,omitempty"`
+	Conditions        []Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

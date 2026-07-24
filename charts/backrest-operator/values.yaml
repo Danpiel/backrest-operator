@@ -46,6 +46,13 @@ operator:
         name: selfsigned-issuer
       duration: 8760h
       renewBefore: 720h
+  # Public download URLs for PVCRestore mode=export (Ingress + EXPORT_PUBLIC_BASE_URL).
+  export:
+    publicBaseURL: ""
+    ingressHost: ""
+    ingressClassName: ""
+    tlsSecretName: ""
+    ingressAnnotations: {}
 
 mcp:
   enabled: true

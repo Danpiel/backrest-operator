@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -252,11 +255,19 @@ func (r *PVCRestoreReconciler) restoreExport(ctx context.Context, restore *opera
 		corev1.EnvVar{Name: "LOG_FORMAT", Value: firstNonEmpty(os.Getenv("LOG_FORMAT"), "console")},
 		corev1.EnvVar{Name: "LOG_LEVEL", Value: firstNonEmpty(os.Getenv("LOG_LEVEL"), "info")},
 	)
+	includeArgs := ""
+	for _, p := range restore.Spec.Restic.PathFilters {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		includeArgs += fmt.Sprintf(" --include %q", p)
+	}
 	resticScript := fmt.Sprintf(`set -euo pipefail
 mkdir -p /work/out
-restic restore %s --target /work/out
+restic restore %s --target /work/out%s
 cd /work/out && tar -cf /work/archive.tar .
-`, snap)
+`, snap, includeArgs)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
@@ -279,6 +290,12 @@ cd /work/out && tar -cf /work/archive.tar .
 						Command: []string{"/export-proxy"},
 						Env:     env,
 						Ports:   []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}},
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt32(8080)},
+							},
+							PeriodSeconds: 5,
+						},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name: "work", MountPath: "/work", ReadOnly: true,
 						}},
@@ -310,9 +327,88 @@ cd /work/out && tar -cf /work/archive.tar .
 	if err := r.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
+	pathSuffix := "/" + token + "/archive.tar"
 	restore.Status.LastJobName = jobName
-	restore.Status.ExportURL = fmt.Sprintf("http://%s.%s.svc:8080/%s/archive.tar", svcName, restore.Namespace, token)
+	restore.Status.ExportURL = fmt.Sprintf("http://%s.%s.svc:8080%s", svcName, restore.Namespace, pathSuffix)
 	restore.Status.ExportExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second).UTC().Format(time.RFC3339)
+
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("EXPORT_PUBLIC_BASE_URL")), "/"); base != "" {
+		if err := r.ensureExportIngress(ctx, restore, svcName, token, labels, ttl); err != nil {
+			return err
+		}
+		restore.Status.ExportExternalURL = base + pathSuffix
+	}
+	return nil
+}
+
+func (r *PVCRestoreReconciler) ensureExportIngress(ctx context.Context, restore *operatorv1alpha1.PVCRestore, svcName, token string, labels map[string]string, ttl int32) error {
+	host := strings.TrimSpace(os.Getenv("EXPORT_INGRESS_HOST"))
+	if host == "" {
+		if u := strings.TrimSpace(os.Getenv("EXPORT_PUBLIC_BASE_URL")); u != "" {
+			u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+			host = strings.Split(u, "/")[0]
+		}
+	}
+	if host == "" {
+		return fmt.Errorf("EXPORT_INGRESS_HOST or host in EXPORT_PUBLIC_BASE_URL is required for public export URLs")
+	}
+	className := strings.TrimSpace(os.Getenv("EXPORT_INGRESS_CLASS"))
+	ingName := "export-" + restore.Name
+	if len(ingName) > 63 {
+		ingName = ingName[:63]
+	}
+	pathType := networkingv1.PathTypePrefix
+	path := "/" + token
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ingName,
+			Namespace: restore.Namespace,
+			Labels:    labels,
+			Annotations: map[string]string{
+				"operator.backrest.io/export-ttl-seconds": fmt.Sprintf("%d", ttl),
+			},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     path,
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: svcName,
+									Port: networkingv1.ServiceBackendPort{Number: 8080},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		},
+	}
+	if className != "" {
+		ing.Spec.IngressClassName = &className
+	}
+	if raw := strings.TrimSpace(os.Getenv("EXPORT_INGRESS_ANNOTATIONS_JSON")); raw != "" {
+		var ann map[string]string
+		if err := json.Unmarshal([]byte(raw), &ann); err != nil {
+			return fmt.Errorf("EXPORT_INGRESS_ANNOTATIONS_JSON: %w", err)
+		}
+		for k, v := range ann {
+			ing.Annotations[k] = v
+		}
+	}
+	if secret := strings.TrimSpace(os.Getenv("EXPORT_INGRESS_TLS_SECRET")); secret != "" {
+		ing.Spec.TLS = []networkingv1.IngressTLS{{
+			Hosts:      []string{host},
+			SecretName: secret,
+		}}
+	}
+	if err := r.Create(ctx, ing); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
 	return nil
 }
 
