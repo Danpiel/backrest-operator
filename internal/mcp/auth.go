@@ -142,7 +142,8 @@ func ImpersonateConfig(base *rest.Config, user *UserIdentity) *rest.Config {
 	cfg.Impersonate = rest.ImpersonationConfig{
 		UserName: user.Username,
 		Groups:   user.Groups,
-		UID:      user.UID,
+		// Omit UID: impersonating uids requires extra RBAC that many clusters
+		// do not grant to the MCP ServiceAccount.
 	}
 	return cfg
 }
