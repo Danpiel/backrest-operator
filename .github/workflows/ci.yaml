@@ -128,7 +128,7 @@ jobs:
           mkdir -p dist
           helm package charts/backrest-operator \
             --version "${{ steps.meta.outputs.chart_version }}" \
-            --appVersion "${{ steps.meta.outputs.chart_version }}" \
+            --app-version "${{ steps.meta.outputs.chart_version }}" \
             -d dist
           ls -la dist/
 
