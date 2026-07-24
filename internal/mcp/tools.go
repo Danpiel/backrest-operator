@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -109,6 +110,33 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 		}
 		return map[string]string{"deleted": strArg(args, "name", "")}, nil
 	case "trigger_backup":
+		name := strArg(args, "name", "")
+		if name != "" {
+			obj, err := dc.Resource(gvrBackup).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				return nil, err
+			}
+			anns := obj.GetAnnotations()
+			if anns == nil {
+				anns = map[string]string{}
+			}
+			token := strArg(args, "token", "")
+			if token == "" {
+				token = fmt.Sprintf("%d", time.Now().UTC().Unix())
+			}
+			anns["operator.backrest.io/force-run"] = token
+			obj.SetAnnotations(anns)
+			updated, err := dc.Resource(gvrBackup).Namespace(ns).Update(ctx, obj, metav1.UpdateOptions{})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{
+				"forced":  true,
+				"name":    name,
+				"token":   token,
+				"resource": updated,
+			}, nil
+		}
 		obj, err := bodyToUnstructured(args["body"], "PVCBackup", ns)
 		if err != nil {
 			return nil, err

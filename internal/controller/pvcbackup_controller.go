@@ -62,7 +62,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	// Resume watching an in-flight Job without re-quiescing.
 	if backup.Status.Phase == "Uploading" && backup.Status.LastJobName != "" {
-		return r.pollBackupJob(ctx, &backup)
+		// A newer force-run must not be swallowed by polling a previous Job.
+		if force := backup.Annotations[annForceRun]; force != "" && force != backup.Status.LastForceRun {
+			logger.Info("force-run requested while Uploading; starting a new run", "token", force, "previousJob", backup.Status.LastJobName)
+		} else {
+			return r.pollBackupJob(ctx, &backup)
+		}
 	}
 
 	if backup.Spec.Schedule != "" {
@@ -180,7 +185,6 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	backup.Status.Phase = "Uploading"
-	_ = r.Status().Update(ctx, &backup)
 	jobName := fmt.Sprintf("pvcbackup-%s-%d", backup.Name, started.Unix())
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
@@ -192,9 +196,13 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.persistQuiesceState(ctx, &backup, quiesceState); err != nil {
 		logger.Error(err, "persist quiesce state")
 	}
-	holdQuiesceForJob = true
+	// Point status at the new Job in one write so a concurrent reconcile cannot
+	// poll the previous Job name while Phase is already Uploading.
 	backup.Status.LastJobName = jobName
-	_ = r.Status().Update(ctx, &backup)
+	if err := r.Status().Update(ctx, &backup); err != nil {
+		return ctrl.Result{}, err
+	}
+	holdQuiesceForJob = true
 	return r.pollBackupJob(ctx, &backup)
 }
 

@@ -33,7 +33,7 @@ var toolPermissions = map[string][3]string{
 	"create_plan":        {"create", "backupplans", "operator.backrest.io"},
 	"update_plan":        {"update", "backupplans", "operator.backrest.io"},
 	"delete_plan":        {"delete", "backupplans", "operator.backrest.io"},
-	"trigger_backup":     {"create", "pvcbackups", "operator.backrest.io"},
+	"trigger_backup":     {"update", "pvcbackups", "operator.backrest.io"},
 	"list_snapshots":     {"get", "backuprepositories", "operator.backrest.io"},
 	"get_snapshot":       {"get", "backuprepositories", "operator.backrest.io"},
 	"delete_snapshot":    {"delete", "backuprepositories", "operator.backrest.io"},
@@ -116,7 +116,7 @@ func (a *Auth) SubjectAccessReview(ctx context.Context, user *UserIdentity, name
 	return sar.Status.Allowed
 }
 
-func (a *Auth) AuthorizeTool(ctx context.Context, user *UserIdentity, tool, namespace string, allowDestructive bool) bool {
+func (a *Auth) AuthorizeTool(ctx context.Context, user *UserIdentity, tool, namespace string, allowDestructive bool, args map[string]interface{}) bool {
 	if _, destructive := DestructiveTools[tool]; destructive && !allowDestructive {
 		a.onDeny(tool)
 		return false
@@ -125,6 +125,14 @@ func (a *Auth) AuthorizeTool(ctx context.Context, user *UserIdentity, tool, name
 	if !ok {
 		a.onDeny(tool)
 		return false
+	}
+	// trigger_backup: force-run existing needs update; create needs create.
+	if tool == "trigger_backup" && args != nil {
+		if name, _ := args["name"].(string); name != "" {
+			perm = [3]string{"update", "pvcbackups", "operator.backrest.io"}
+		} else {
+			perm = [3]string{"create", "pvcbackups", "operator.backrest.io"}
+		}
 	}
 	if user.Username == StdioUsername {
 		return true

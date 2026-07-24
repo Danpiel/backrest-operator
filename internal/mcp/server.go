@@ -73,7 +73,7 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 			userName = user.Username
 		}
 		log := ctrl.LoggerFrom(ctx).WithName("mcp").WithValues("tool", params.Name, "namespace", ns, "user", userName)
-		if !s.Auth.AuthorizeTool(ctx, user, params.Name, ns, allow) {
+		if !s.Auth.AuthorizeTool(ctx, user, params.Name, ns, allow, params.Arguments) {
 			log.Info("tool denied")
 			return rpcError(req.ID, 403, fmt.Sprintf("forbidden: %s", params.Name)), http.StatusForbidden
 		}

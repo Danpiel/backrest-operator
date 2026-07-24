@@ -24,7 +24,7 @@ func TestAuthorizeDestructiveWithoutFlag(t *testing.T) {
 	a := mcp.NewAuthForTest(func(tool string) { denies++ })
 	user := &mcp.UserIdentity{Username: "alice", Groups: []string{"devs"}}
 	for tool := range mcp.DestructiveTools {
-		if a.AuthorizeTool(context.Background(), user, tool, "app", false) {
+		if a.AuthorizeTool(context.Background(), user, tool, "app", false, nil) {
 			t.Fatalf("expected deny for %s", tool)
 		}
 	}
@@ -37,7 +37,7 @@ func TestAuthorizeUnknownTool(t *testing.T) {
 	denies := 0
 	a := mcp.NewAuthForTest(func(tool string) { denies++ })
 	user := &mcp.UserIdentity{Username: "alice"}
-	if a.AuthorizeTool(context.Background(), user, "nonexistent_tool", "app", true) {
+	if a.AuthorizeTool(context.Background(), user, "nonexistent_tool", "app", true, nil) {
 		t.Fatal("expected deny")
 	}
 	if denies != 1 {
@@ -48,13 +48,13 @@ func TestAuthorizeUnknownTool(t *testing.T) {
 func TestStdioBypassesSAR(t *testing.T) {
 	a := mcp.NewAuthForTest(nil)
 	user := &mcp.UserIdentity{Username: mcp.StdioUsername, Groups: []string{"system:authenticated"}}
-	if !a.AuthorizeTool(context.Background(), user, "list_plans", "app", false) {
+	if !a.AuthorizeTool(context.Background(), user, "list_plans", "app", false, nil) {
 		t.Fatal("stdio should allow non-destructive")
 	}
-	if a.AuthorizeTool(context.Background(), user, "delete_plan", "app", false) {
+	if a.AuthorizeTool(context.Background(), user, "delete_plan", "app", false, nil) {
 		t.Fatal("stdio still requires allow_destructive")
 	}
-	if !a.AuthorizeTool(context.Background(), user, "delete_plan", "app", true) {
+	if !a.AuthorizeTool(context.Background(), user, "delete_plan", "app", true, nil) {
 		t.Fatal("stdio should allow with flag")
 	}
 }
