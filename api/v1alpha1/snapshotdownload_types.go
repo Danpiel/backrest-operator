@@ -14,6 +14,10 @@ type SnapshotDownloadSpec struct {
 	PlanID string `json:"planID,omitempty"`
 	// PublicBaseURL overrides BACKREST_PUBLIC_BASE_URL for the absolute download link.
 	PublicBaseURL string `json:"publicBaseURL,omitempty"`
+	// Mode controls how the URL is minted:
+	// - restore (default): schedule Backrest Restore (visible in UI), then GetDownloadURL
+	// - stream: GetDownloadURL from indexed snapshot only (no Restore op in UI)
+	Mode string `json:"mode,omitempty"`
 }
 
 // SnapshotDownloadStatus holds the minted download URL.

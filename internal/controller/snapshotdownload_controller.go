@@ -72,7 +72,12 @@ func (r *SnapshotDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	sd.Status.OperationID = link.OperationID
 	sd.Status.SnapshotID = sd.Spec.SnapshotID
 	sd.Status.Path = link.Path
-	sd.Status.Message = "signed Backrest GetDownloadURL ready"
+	sd.Status.Message = "signed Backrest download URL ready (restore visible in UI when mode=restore)"
+	if link.Mode == "restore" {
+		sd.Status.Message = "Backrest Restore completed; download URL ready (visible in UI)"
+	} else {
+		sd.Status.Message = "stream URL ready (index snapshot; no Restore op in UI)"
+	}
 	sd.Status.LastRefresh = refresh
 	sd.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Ready", Status: "True", Message: "URL ready"}}
 	if !link.ExpiresAt.IsZero() {
@@ -120,7 +125,19 @@ func (r *SnapshotDownloadReconciler) mint(ctx context.Context, sd *operatorv1alp
 	if path == "" {
 		path = "/"
 	}
-	return bc.MintDownloadURL(ctx, repo.Name, sd.Spec.SnapshotID, sd.Spec.PlanID, path, publicBase)
+	mode := sd.Spec.Mode
+	if mode == "" {
+		mode = "restore"
+	}
+	target := ""
+	if mode == "restore" {
+		target = fmt.Sprintf("/data/snapdl/%s/%s/%d", sd.Namespace, sd.Name, time.Now().Unix())
+	}
+	link, err := bc.MintDownloadURL(ctx, repo.Name, sd.Spec.SnapshotID, sd.Spec.PlanID, path, publicBase, mode, target)
+	if err != nil {
+		return nil, err
+	}
+	return link, nil
 }
 
 func (r *SnapshotDownloadReconciler) SetupWithManager(mgr ctrl.Manager) error {

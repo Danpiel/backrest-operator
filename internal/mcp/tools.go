@@ -232,6 +232,7 @@ func (t *Tools) getSnapshotDownloadURL(ctx context.Context, dc dynamic.Interface
 	}
 	path := strArg(args, "path", "/")
 	planID := strArg(args, "plan_id", "")
+	mode := strArg(args, "mode", "restore")
 	publicBase := strArg(args, "public_base_url", "")
 	if publicBase == "" {
 		publicBase = strings.TrimSpace(os.Getenv("BACKREST_PUBLIC_BASE_URL"))
@@ -243,7 +244,11 @@ func (t *Tools) getSnapshotDownloadURL(ctx context.Context, dc dynamic.Interface
 	if err != nil {
 		return nil, err
 	}
-	link, err := bc.MintDownloadURL(ctx, repo, snapID, planID, path, publicBase)
+	target := ""
+	if mode == "" || mode == "restore" {
+		target = fmt.Sprintf("/data/snapdl/mcp/%s/%d", min8(snapID), time.Now().Unix())
+	}
+	link, err := bc.MintDownloadURL(ctx, repo, snapID, planID, path, publicBase, mode, target)
 	if err != nil {
 		return nil, err
 	}
@@ -254,13 +259,21 @@ func (t *Tools) getSnapshotDownloadURL(ctx context.Context, dc dynamic.Interface
 		"snapshotId":  snapID,
 		"path":        link.Path,
 		"repository":  repo,
-		"contentType": "application/octet-stream (.tar stream via restic dump)",
-		"note":        "Signed JWT URL from Backrest GetDownloadURL. Prefer curl -L -o backup.tar <url>.",
+		"mode":        link.Mode,
+		"contentType": "application/octet-stream (.tar)",
+		"note":        "mode=restore schedules Backrest Restore (visible in UI). mode=stream skips Restore.",
 	}
 	if !link.ExpiresAt.IsZero() {
 		out["expiresAt"] = link.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	return out, nil
+}
+
+func min8(s string) string {
+	if len(s) < 8 {
+		return s
+	}
+	return s[:8]
 }
 
 func (t *Tools) createSnapshotDownload(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
@@ -272,8 +285,9 @@ func (t *Tools) createSnapshotDownload(ctx context.Context, dc dynamic.Interface
 	repoNS := strArg(args, "repository_namespace", ns)
 	path := strArg(args, "path", "/")
 	planID := strArg(args, "plan_id", "")
+	mode := strArg(args, "mode", "restore")
 	publicBase := strArg(args, "public_base_url", "")
-	waitSec := intArg(args, "wait_seconds", 60)
+	waitSec := intArg(args, "wait_seconds", 300)
 	if waitSec < 5 {
 		waitSec = 5
 	}
@@ -288,6 +302,7 @@ func (t *Tools) createSnapshotDownload(ctx context.Context, dc dynamic.Interface
 		"repositoryRef": map[string]interface{}{"name": repo, "namespace": repoNS},
 		"snapshotID":    snapID,
 		"path":          path,
+		"mode":          mode,
 	}
 	if planID != "" {
 		spec["planID"] = planID
@@ -337,11 +352,13 @@ func (t *Tools) createSnapshotDownload(ctx context.Context, dc dynamic.Interface
 	url, _, _ := unstructured.NestedString(latest.Object, "status", "downloadURL")
 	expires, _, _ := unstructured.NestedString(latest.Object, "status", "expiresAt")
 	msg, _, _ := unstructured.NestedString(latest.Object, "status", "message")
+	opID, _, _ := unstructured.NestedFieldNoCopy(latest.Object, "status", "operationID")
 	out := map[string]interface{}{
 		"name": crName, "namespace": ns, "phase": phase,
 		"downloadURL": url, "expiresAt": expires, "message": msg,
+		"operationID": opID, "mode": mode,
 		"snapshotId": snapID, "repository": repo,
-		"note": "URL is also in .status.downloadURL (kubectl get snapdl -o wide / -o jsonpath={.status.downloadURL}).",
+		"note": "Restore appears in Backrest UI when mode=restore. URL also in .status.downloadURL.",
 	}
 	if url == "" {
 		return out, fmt.Errorf("SnapshotDownload %s/%s created but downloadURL not ready yet (phase=%s); retry get_snapshot_download", ns, crName, phase)

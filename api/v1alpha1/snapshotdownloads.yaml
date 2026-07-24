@@ -58,6 +58,13 @@ spec:
                 publicBaseURL:
                   type: string
                   description: Optional HTTPS base (default BACKREST_PUBLIC_BASE_URL)
+                mode:
+                  type: string
+                  enum:
+                    - restore
+                    - stream
+                  default: restore
+                  description: "restore = Backrest Restore visible in UI then download URL; stream = index-snapshot dump only"
             status:
               type: object
               properties:

@@ -261,16 +261,160 @@ type DownloadLink struct {
 	OperationID int64
 	Path        string
 	ExpiresAt   time.Time
+	Mode        string // restore | stream
 }
 
-// MintDownloadURL finds an indexed snapshot operation and returns a signed download URL.
-func (c *Client) MintDownloadURL(ctx context.Context, repoID, snapshotID, planID, path, publicBase string) (*DownloadLink, error) {
+// Restore schedules a Backrest restore task and returns the operation id.
+func (c *Client) Restore(ctx context.Context, planID, repoID, snapshotID, path, target string) (int64, error) {
+	if path == "" {
+		path = "/"
+	}
+	if target == "" {
+		return 0, fmt.Errorf("restore target is required")
+	}
+	var out struct {
+		OperationID json.Number `json:"operationId"`
+	}
+	if err := c.post(ctx, "Restore", map[string]any{
+		"planId":     planID,
+		"repoId":     repoID,
+		"snapshotId": snapshotID,
+		"path":       path,
+		"target":     target,
+	}, &out); err != nil {
+		return 0, err
+	}
+	id, err := out.OperationID.Int64()
+	if err != nil || id == 0 {
+		return 0, fmt.Errorf("restore returned empty operationId")
+	}
+	return id, nil
+}
+
+// GetOperation returns a single operation by id (via selector.operationId).
+func (c *Client) GetOperation(ctx context.Context, opID int64) (map[string]any, error) {
+	ops, err := c.GetOperations(ctx, map[string]any{"operationId": opID}, 1)
+	if err != nil {
+		return nil, err
+	}
+	for _, op := range ops {
+		if jsonNumberAsInt64(op["id"]) == opID {
+			return op, nil
+		}
+	}
+	// Some Backrest builds ignore operationId selector — scan lastN.
+	ops, err = c.GetOperations(ctx, nil, 50)
+	if err != nil {
+		return nil, err
+	}
+	for _, op := range ops {
+		if jsonNumberAsInt64(op["id"]) == opID {
+			return op, nil
+		}
+	}
+	return nil, fmt.Errorf("operation %d not found", opID)
+}
+
+// WaitOperation waits until the operation reaches a terminal status.
+func (c *Client) WaitOperation(ctx context.Context, opID int64, timeout time.Duration) (map[string]any, error) {
+	if timeout <= 0 {
+		timeout = 10 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		op, err := c.GetOperation(ctx, opID)
+		if err != nil {
+			return nil, err
+		}
+		status, _ := op["status"].(string)
+		switch status {
+		case "STATUS_SUCCESS", "STATUS_WARNING":
+			return op, nil
+		case "STATUS_ERROR", "STATUS_SYSTEM_CANCELLED", "STATUS_USER_CANCELLED":
+			msg, _ := op["displayMessage"].(string)
+			if msg == "" {
+				msg = status
+			}
+			return op, fmt.Errorf("operation %d failed: %s", opID, msg)
+		}
+		if time.Now().After(deadline) {
+			return op, fmt.Errorf("operation %d still %s after %s", opID, status, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// ResolvePlanID finds planId from an indexed snapshot operation.
+func (c *Client) ResolvePlanID(ctx context.Context, repoID, snapshotID string) (string, error) {
+	selector := map[string]any{"snapshotId": snapshotID}
+	if repoID != "" {
+		selector["repoId"] = repoID
+	}
+	ops, err := c.GetOperations(ctx, selector, 20)
+	if err != nil {
+		return "", err
+	}
+	for _, op := range ops {
+		if _, ok := op["operationIndexSnapshot"]; !ok {
+			continue
+		}
+		if plan, _ := op["planId"].(string); plan != "" {
+			return plan, nil
+		}
+	}
+	return "", fmt.Errorf("no indexed snapshot with planId for snapshot_id=%s (run index_repository)", snapshotID)
+}
+
+// MintDownloadURL mints a signed download URL.
+// mode "restore" (default): schedule Backrest Restore (shows in UI) then GetDownloadURL.
+// mode "stream": GetDownloadURL from indexed snapshot only (no Restore in UI).
+func (c *Client) MintDownloadURL(ctx context.Context, repoID, snapshotID, planID, path, publicBase, mode, restoreTarget string) (*DownloadLink, error) {
 	if snapshotID == "" {
 		return nil, fmt.Errorf("snapshotID is required")
 	}
 	if path == "" {
 		path = "/"
 	}
+	if mode == "" || mode == "restore" {
+		if planID == "" {
+			var err error
+			planID, err = c.ResolvePlanID(ctx, repoID, snapshotID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if restoreTarget == "" {
+			restoreTarget = fmt.Sprintf("/data/snapdl/%s-%d", snapshotID[:min(8, len(snapshotID))], time.Now().Unix())
+		}
+		opID, err := c.Restore(ctx, planID, repoID, snapshotID, path, restoreTarget)
+		if err != nil {
+			return nil, fmt.Errorf("backrest Restore: %w", err)
+		}
+		if _, err := c.WaitOperation(ctx, opID, 15*time.Minute); err != nil {
+			return nil, err
+		}
+		rel, err := c.GetDownloadURL(ctx, opID, "/")
+		if err != nil {
+			return nil, err
+		}
+		link := &DownloadLink{
+			DownloadURL: AbsoluteDownloadURL(publicBase, rel),
+			RelativeURL: rel,
+			OperationID: opID,
+			Path:        path,
+			Mode:        "restore",
+		}
+		if exp, ok := ExpiryFromDownloadRelativeURL(rel); ok {
+			link.ExpiresAt = exp
+		}
+		return link, nil
+	}
+
+	// stream mode — index snapshot dump
 	selector := map[string]any{"snapshotId": snapshotID}
 	if planID != "" {
 		selector["planId"] = planID
@@ -304,11 +448,19 @@ func (c *Client) MintDownloadURL(ctx context.Context, repoID, snapshotID, planID
 		RelativeURL: rel,
 		OperationID: opID,
 		Path:        path,
+		Mode:        "stream",
 	}
 	if exp, ok := ExpiryFromDownloadRelativeURL(rel); ok {
 		link.ExpiresAt = exp
 	}
 	return link, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ExpiryFromDownloadRelativeURL parses JWT exp from ./download/<jwt>/ when present.
