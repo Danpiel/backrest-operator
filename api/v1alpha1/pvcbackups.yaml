@@ -33,12 +33,16 @@ spec:
             spec:
               type: object
               required:
-                - pvcName
                 - repositoryRef
               properties:
                 pvcName:
                   type: string
-                  description: Name of the PersistentVolumeClaim to back up.
+                  description: Single PVC to back up. Prefer pvcNames for multi-volume plans.
+                pvcNames:
+                  type: array
+                  description: Multiple PVCs backed up in one quiesce window.
+                  items:
+                    type: string
                 repositoryRef:
                   type: object
                   required:
@@ -145,6 +149,13 @@ spec:
                   type: string
                   description: >-
                     Cron schedule for recurring backups. Empty means one-shot.
+                    The operator creates and owns the CronJob (and a minimal
+                    trigger ServiceAccount/Role in the PVC namespace).
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Node selector for the restic Job (required for RWO/local volumes).
                 retention:
                   type: object
                   properties:

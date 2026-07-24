@@ -3,7 +3,10 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 type PVCBackupSpec struct {
-	PVCName                 string                `json:"pvcName"`
+	// PVCName is a single claim to back up. Prefer PVCNames for multi-volume plans.
+	PVCName string `json:"pvcName,omitempty"`
+	// PVCNames backs up multiple PVCs in one quiesce window (same Job).
+	PVCNames                []string              `json:"pvcNames,omitempty"`
 	RepositoryRef           ObjectReference       `json:"repositoryRef"`
 	Strategy                PVCBackupStrategy     `json:"strategy,omitempty"`
 	VolumeSnapshotClassName string                `json:"volumeSnapshotClassName,omitempty"`
@@ -13,6 +16,7 @@ type PVCBackupSpec struct {
 	Excludes                []string              `json:"excludes,omitempty"`
 	Schedule                string                `json:"schedule,omitempty"`
 	Retention               PVCBackupRetention    `json:"retention,omitempty"`
+	NodeSelector            map[string]string     `json:"nodeSelector,omitempty"`
 	BackoffLimit            *int32                `json:"backoffLimit,omitempty"`
 	TTLSecondsAfterFinished *int32                `json:"ttlSecondsAfterFinished,omitempty"`
 }
@@ -55,6 +59,7 @@ type PVCBackupStatus struct {
 	LastResticSnapshotID string      `json:"lastResticSnapshotID,omitempty"`
 	LastJobName          string      `json:"lastJobName,omitempty"`
 	LastDurationSeconds  int64       `json:"lastDurationSeconds,omitempty"`
+	LastForceRun         string      `json:"lastForceRun,omitempty"`
 	Conditions           []Condition `json:"conditions,omitempty"`
 }
 

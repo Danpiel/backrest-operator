@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -15,11 +17,17 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
 	"github.com/Danpiel/backrest-operator/internal/filters"
 	"github.com/Danpiel/backrest-operator/internal/metrics"
+)
+
+const (
+	annForceRun  = "operator.backrest.io/force-run"
+	kubectlImage = "bitnami/kubectl:1.32"
 )
 
 var volumeSnapshotGVK = schema.GroupVersionKind{
@@ -40,11 +48,29 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !filters.ObjectAllowed(backup.Namespace, backup.Labels) {
 		return ctrl.Result{}, nil
 	}
-	if backup.Status.Phase == "Succeeded" && backup.Spec.Schedule == "" {
-		return ctrl.Result{}, nil
+
+	pvcs := pvcList(&backup)
+	if len(pvcs) == 0 {
+		return r.fail(ctx, &backup, fmt.Errorf("pvcName or pvcNames required"))
 	}
-	if backup.Status.Phase == "Uploading" || backup.Status.Phase == "Snapshotting" {
-		// avoid double-run; rely on status
+
+	if backup.Spec.Schedule != "" {
+		if err := r.ensureScheduleCron(ctx, &backup); err != nil {
+			return r.fail(ctx, &backup, err)
+		}
+		force := ""
+		if backup.Annotations != nil {
+			force = backup.Annotations[annForceRun]
+		}
+		if force == "" || force == backup.Status.LastForceRun {
+			if backup.Status.Phase == "" || backup.Status.Phase == "Failed" {
+				backup.Status.Phase = "Scheduled"
+				_ = r.Status().Update(ctx, &backup)
+			}
+			return ctrl.Result{}, nil
+		}
+	} else if backup.Status.Phase == "Succeeded" {
+		return ctrl.Result{}, nil
 	}
 
 	started := time.Now()
@@ -68,6 +94,9 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
+	if err := r.ensureRepoSecrets(ctx, &backup, &repo); err != nil {
+		return r.fail(ctx, &backup, err)
+	}
 
 	needQuiesce := backup.Spec.Quiesce.Enabled
 	for _, s := range pipeline {
@@ -85,10 +114,13 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	uploadPVC := backup.Spec.PVCName
+	uploadPVCs := pvcs
 	var snapName string
 	for _, step := range pipeline {
 		if step == "csiSnapshot" || step == "topolvmSnapshot" {
+			if len(pvcs) != 1 {
+				return r.fail(ctx, &backup, fmt.Errorf("csiSnapshot supports a single pvcName; use quiescedLive for multi-PVC"))
+			}
 			if backup.Spec.VolumeSnapshotClassName == "" {
 				return r.fail(ctx, &backup, fmt.Errorf("volumeSnapshotClassName required"))
 			}
@@ -102,7 +134,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if err := r.cloneFromSnapshot(ctx, &backup, snapName, clone); err != nil {
 				return r.fail(ctx, &backup, err)
 			}
-			uploadPVC = clone
+			uploadPVCs = []string{clone}
 		}
 	}
 
@@ -112,11 +144,9 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
 	}
-	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVC); err != nil {
+	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVCs); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
-	// Non-blocking: mark pending job; a follow-up reconcile can check Job status.
-	// For simplicity wait briefly via requeue.
 	var job batchv1.Job
 	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: backup.Namespace}, &job); err == nil {
 		if job.Status.Succeeded > 0 {
@@ -124,7 +154,13 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
 			metrics.BackupDuration.WithLabelValues(backup.Namespace, backup.Name).Observe(dur)
 			metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
+			if force := backup.Annotations[annForceRun]; force != "" {
+				backup.Status.LastForceRun = force
+			}
 			backup.Status.Phase = "Succeeded"
+			if backup.Spec.Schedule != "" {
+				backup.Status.Phase = "Scheduled"
+			}
 			backup.Status.LastBackupTime = time.Now().UTC().Format(time.RFC3339)
 			backup.Status.LastSnapshotName = snapName
 			backup.Status.LastJobName = jobName
@@ -149,6 +185,176 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	backup.Status.LastJobName = jobName
 	_ = r.Status().Update(ctx, &backup)
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+func pvcList(b *operatorv1alpha1.PVCBackup) []string {
+	if len(b.Spec.PVCNames) > 0 {
+		return append([]string{}, b.Spec.PVCNames...)
+	}
+	if b.Spec.PVCName != "" {
+		return []string{b.Spec.PVCName}
+	}
+	return nil
+}
+
+func (r *PVCBackupReconciler) ensureScheduleCron(ctx context.Context, b *operatorv1alpha1.PVCBackup) error {
+	saName := "pvcbackup-" + b.Name
+	if len(saName) > 63 {
+		saName = saName[:63]
+	}
+	cronName := saName
+	labels := map[string]string{
+		"app.kubernetes.io/name":       "backrest",
+		"app.kubernetes.io/component":  "pvcbackup-schedule",
+		"app.kubernetes.io/managed-by": "backrest-operator",
+		"operator.backrest.io/pvcbackup": b.Name,
+	}
+
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels}}
+	_ = controllerutil.SetControllerReference(b, sa, r.Scheme)
+	if err := r.createOrIgnore(ctx, sa); err != nil {
+		return err
+	}
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups:     []string{"operator.backrest.io"},
+			Resources:     []string{"pvcbackups"},
+			ResourceNames: []string{b.Name},
+			Verbs:         []string{"get", "patch", "update"},
+		}},
+	}
+	_ = controllerutil.SetControllerReference(b, role, r.Scheme)
+	if err := r.createOrUpdateRole(ctx, role); err != nil {
+		return err
+	}
+
+	rb := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels},
+		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: saName},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: saName, Namespace: b.Namespace}},
+	}
+	_ = controllerutil.SetControllerReference(b, rb, r.Scheme)
+	if err := r.createOrUpdateRoleBinding(ctx, rb); err != nil {
+		return err
+	}
+
+	enableLinks := false
+	script := fmt.Sprintf(
+		`kubectl -n %s annotate pvcbackup %s %s="$(date -u +%%Y%%m%%d%%H%%M%%S)" --overwrite`,
+		b.Namespace, b.Name, annForceRun,
+	)
+	cron := &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Name: cronName, Namespace: b.Namespace, Labels: labels},
+		Spec: batchv1.CronJobSpec{
+			Schedule:          b.Spec.Schedule,
+			ConcurrencyPolicy: batchv1.ForbidConcurrent,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							ServiceAccountName: saName,
+							RestartPolicy:      corev1.RestartPolicyOnFailure,
+							EnableServiceLinks: &enableLinks,
+							Containers: []corev1.Container{{
+								Name:    "trigger",
+								Image:   kubectlImage,
+								Command: []string{"/bin/bash", "-ec", script},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	_ = controllerutil.SetControllerReference(b, cron, r.Scheme)
+	var cur batchv1.CronJob
+	err := r.Get(ctx, client.ObjectKeyFromObject(cron), &cur)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, cron)
+	}
+	if err != nil {
+		return err
+	}
+	cur.Spec = cron.Spec
+	return r.Update(ctx, &cur)
+}
+
+func (r *PVCBackupReconciler) createOrIgnore(ctx context.Context, obj client.Object) error {
+	err := r.Create(ctx, obj)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func (r *PVCBackupReconciler) createOrUpdateRole(ctx context.Context, desired *rbacv1.Role) error {
+	var cur rbacv1.Role
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	cur.Rules = desired.Rules
+	return r.Update(ctx, &cur)
+}
+
+func (r *PVCBackupReconciler) createOrUpdateRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
+	var cur rbacv1.RoleBinding
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	cur.RoleRef = desired.RoleRef
+	cur.Subjects = desired.Subjects
+	return r.Update(ctx, &cur)
+}
+
+func (r *PVCBackupReconciler) ensureRepoSecrets(ctx context.Context, b *operatorv1alpha1.PVCBackup, repo *operatorv1alpha1.BackupRepository) error {
+	repoNS := repo.Namespace
+	if repoNS == b.Namespace {
+		return nil
+	}
+	// Mirror password + env secrets into the PVC namespace so Jobs can mount them.
+	if err := r.mirrorSecret(ctx, repoNS, repo.Spec.PasswordSecretRef.Name, b.Namespace, repo.Spec.PasswordSecretRef.Name, b); err != nil {
+		return err
+	}
+	if repo.Spec.EnvFromSecretRef != nil && repo.Spec.EnvFromSecretRef.Name != "" {
+		if err := r.mirrorSecret(ctx, repoNS, repo.Spec.EnvFromSecretRef.Name, b.Namespace, repo.Spec.EnvFromSecretRef.Name, b); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PVCBackupReconciler) mirrorSecret(ctx context.Context, srcNS, srcName, dstNS, dstName string, owner client.Object) error {
+	var src corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: srcNS, Name: srcName}, &src); err != nil {
+		return err
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: dstName, Namespace: dstNS},
+		Type:       src.Type,
+		Data:       src.Data,
+	}
+	_ = controllerutil.SetControllerReference(owner, desired, r.Scheme)
+	var cur corev1.Secret
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	cur.Data = src.Data
+	cur.Type = src.Type
+	return r.Update(ctx, &cur)
 }
 
 func (r *PVCBackupReconciler) fail(ctx context.Context, b *operatorv1alpha1.PVCBackup, err error) (ctrl.Result, error) {
@@ -178,9 +384,6 @@ func (r *PVCBackupReconciler) quiesce(ctx context.Context, b *operatorv1alpha1.P
 
 func (r *PVCBackupReconciler) unquiesce(ctx context.Context, defaultNS string, state map[string]int32) error {
 	for key, replicas := range state {
-		var kind, ns, name string
-		fmt.Sscanf(key, "%s/%s/%s", &kind, &ns, &name)
-		// key format Kind/ns/name — Sscanf with %s stops at /
 		parts := split3(key)
 		if len(parts) != 3 {
 			continue
@@ -191,18 +394,7 @@ func (r *PVCBackupReconciler) unquiesce(ctx context.Context, defaultNS string, s
 }
 
 func split3(s string) []string {
-	out := []string{}
-	cur := ""
-	for i := 0; i < len(s); i++ {
-		if s[i] == '/' {
-			out = append(out, cur)
-			cur = ""
-			continue
-		}
-		cur += string(s[i])
-	}
-	out = append(out, cur)
-	return out
+	return strings.SplitN(s, "/", 3)
 }
 
 func (r *PVCBackupReconciler) scaleWorkload(ctx context.Context, kind, ns, name string, replicas int32) (int32, error) {
@@ -239,8 +431,12 @@ func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1a
 	u.SetGroupVersionKind(volumeSnapshotGVK)
 	u.SetName(snapName)
 	u.SetNamespace(b.Namespace)
-	_ = unstructured.SetNestedField(u.Object, b.Spec.VolumeSnapshotClassName, "spec", "volumeSnapshotClassName")
-	_ = unstructured.SetNestedField(u.Object, b.Spec.PVCName, "spec", "source", "persistentVolumeClaimName")
+	u.Object["spec"] = map[string]interface{}{
+		"volumeSnapshotClassName": b.Spec.VolumeSnapshotClassName,
+		"source": map[string]interface{}{
+			"persistentVolumeClaimName": b.Spec.PVCName,
+		},
+	}
 	err := r.Create(ctx, u)
 	if apierrors.IsAlreadyExists(err) {
 		return nil
@@ -261,29 +457,25 @@ func (r *PVCBackupReconciler) cloneFromSnapshot(ctx context.Context, b *operator
 	if err := r.Get(ctx, types.NamespacedName{Name: b.Spec.PVCName, Namespace: b.Namespace}, &src); err != nil {
 		return err
 	}
-	size := src.Spec.Resources.Requests[corev1.ResourceStorage]
-	apiGroup := "snapshot.storage.k8s.io"
-	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: cloneName, Namespace: b.Namespace},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: size}},
-			DataSource: &corev1.TypedLocalObjectReference{
-				APIGroup: &apiGroup,
-				Kind:     "VolumeSnapshot",
-				Name:     snapName,
-			},
-			StorageClassName: src.Spec.StorageClassName,
-		},
+	clone := src.DeepCopy()
+	clone.ObjectMeta = metav1.ObjectMeta{Name: cloneName, Namespace: b.Namespace}
+	clone.Spec.VolumeName = ""
+	clone.Spec.DataSource = &corev1.TypedLocalObjectReference{
+		APIGroup: strPtr("snapshot.storage.k8s.io"),
+		Kind:     "VolumeSnapshot",
+		Name:     snapName,
 	}
-	err := r.Create(ctx, pvc)
+	clone.Status = corev1.PersistentVolumeClaimStatus{}
+	err := r.Create(ctx, clone)
 	if apierrors.IsAlreadyExists(err) {
 		return nil
 	}
 	return err
 }
 
-func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *operatorv1alpha1.PVCBackup, repo *operatorv1alpha1.BackupRepository, jobName, pvcName string) error {
+func strPtr(s string) *string { return &s }
+
+func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *operatorv1alpha1.PVCBackup, repo *operatorv1alpha1.BackupRepository, jobName string, pvcNames []string) error {
 	enableLinks := false
 	backoff := int32(2)
 	if b.Spec.BackoffLimit != nil {
@@ -293,19 +485,52 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 	if b.Spec.TTLSecondsAfterFinished != nil {
 		ttl = *b.Spec.TTLSecondsAfterFinished
 	}
-	cmd := []string{"restic", "backup", "/data"}
-	for _, ex := range b.Spec.Excludes {
-		cmd = append(cmd, "--exclude", ex)
+
+	vols := []corev1.Volume{}
+	mounts := []corev1.VolumeMount{}
+	paths := b.Spec.Paths
+	if len(paths) == 0 {
+		paths = nil
+		for i, pvc := range pvcNames {
+			volName := fmt.Sprintf("data-%d", i)
+			mountPath := "/data/" + sanitizePath(pvc)
+			vols = append(vols, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc, ReadOnly: true},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: mountPath, ReadOnly: true})
+			paths = append(paths, mountPath)
+		}
+	} else {
+		for i, pvc := range pvcNames {
+			volName := fmt.Sprintf("data-%d", i)
+			vols = append(vols, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvc, ReadOnly: true},
+				},
+			})
+			mounts = append(mounts, corev1.VolumeMount{Name: volName, MountPath: paths[min(i, len(paths)-1)], ReadOnly: true})
+		}
 	}
+
+	cmd := []string{"sh", "-ec", "restic snapshots >/dev/null 2>&1 || restic init; restic backup " + strings.Join(shellQuote(paths), " ")}
+	for _, ex := range b.Spec.Excludes {
+		cmd[2] += " --exclude " + shellQuoteOne(ex)
+	}
+	if b.Spec.Retention.KeepLast != nil {
+		cmd[2] += fmt.Sprintf(" && restic forget --keep-last %d --prune", *b.Spec.Retention.KeepLast)
+	}
+
 	env := resticEnv(repo)
 	container := corev1.Container{
-		Name:    "restic",
-		Image:   resticImage,
-		Command: cmd,
-		Env:     env,
-		VolumeMounts: []corev1.VolumeMount{{
-			Name: "data", MountPath: "/data",
-		}},
+		Name:         "restic",
+		Image:        resticImage,
+		Command:      cmd,
+		Env:          env,
+		VolumeMounts: mounts,
 	}
 	if repo.Spec.EnvFromSecretRef != nil && repo.Spec.EnvFromSecretRef.Name != "" {
 		container.EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
@@ -321,22 +546,39 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					EnableServiceLinks: &enableLinks,
+					NodeSelector:       b.Spec.NodeSelector,
 					Containers:         []corev1.Container{container},
-					Volumes: []corev1.Volume{{
-						Name: "data",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
-						},
-					}},
+					Volumes:            vols,
 				},
 			},
 		},
 	}
+	_ = controllerutil.SetControllerReference(b, job, r.Scheme)
 	err := r.Create(ctx, job)
 	if apierrors.IsAlreadyExists(err) {
 		return nil
 	}
 	return err
+}
+
+func sanitizePath(s string) string {
+	s = strings.ReplaceAll(s, "/", "-")
+	if s == "" {
+		return "vol"
+	}
+	return s
+}
+
+func shellQuote(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = shellQuoteOne(p)
+	}
+	return out
+}
+
+func shellQuoteOne(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func resticEnv(repo *operatorv1alpha1.BackupRepository) []corev1.EnvVar {
@@ -355,5 +597,6 @@ func (r *PVCBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&operatorv1alpha1.PVCBackup{}).
 		Owns(&batchv1.Job{}).
+		Owns(&batchv1.CronJob{}).
 		Complete(r)
 }

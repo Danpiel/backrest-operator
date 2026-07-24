@@ -70,6 +70,16 @@ spec:
                           type: string
                         host:
                           type: string
+                        annotations:
+                          type: object
+                          additionalProperties:
+                            type: string
+                        backendServiceName:
+                          type: string
+                          description: Optional backend Service (e.g. oauth2-proxy).
+                        backendServicePort:
+                          type: integer
+                          format: int32
                         tls:
                           type: array
                           items:

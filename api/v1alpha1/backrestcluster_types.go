@@ -25,10 +25,16 @@ type BackrestHostSpec struct {
 }
 
 type BackrestIngressSpec struct {
-	Enabled   bool                   `json:"enabled,omitempty"`
-	ClassName string                 `json:"className,omitempty"`
-	Host      string                 `json:"host,omitempty"`
+	Enabled   bool                     `json:"enabled,omitempty"`
+	ClassName string                   `json:"className,omitempty"`
+	Host      string                   `json:"host,omitempty"`
 	TLS       []map[string]interface{} `json:"tls,omitempty"`
+	// Annotations applied to the managed Ingress (cert-manager, external-dns, Traefik, …).
+	Annotations map[string]string `json:"annotations,omitempty"`
+	// BackendServiceName overrides the default Backrest host Service (e.g. oauth2-proxy).
+	BackendServiceName string `json:"backendServiceName,omitempty"`
+	// BackendServicePort defaults to the Backrest UI port when empty.
+	BackendServicePort int32 `json:"backendServicePort,omitempty"`
 }
 
 type BackrestPersistenceSpec struct {

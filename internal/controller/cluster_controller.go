@@ -215,9 +215,22 @@ func (r *BackrestClusterReconciler) ensureIngress(ctx context.Context, c *operat
 	if host == "" {
 		host = "backrest.example.com"
 	}
+	backendName := svcName
+	if c.Spec.Host.Ingress.BackendServiceName != "" {
+		backendName = c.Spec.Host.Ingress.BackendServiceName
+	}
+	backendPort := int32(backrestPort)
+	if c.Spec.Host.Ingress.BackendServicePort != 0 {
+		backendPort = c.Spec.Host.Ingress.BackendServicePort
+	}
 	pathType := netv1.PathTypePrefix
 	ing := &netv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: ingName, Namespace: c.Namespace, Labels: labels},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        ingName,
+			Namespace:   c.Namespace,
+			Labels:      labels,
+			Annotations: c.Spec.Host.Ingress.Annotations,
+		},
 		Spec: netv1.IngressSpec{
 			Rules: []netv1.IngressRule{{
 				Host: host,
@@ -225,7 +238,7 @@ func (r *BackrestClusterReconciler) ensureIngress(ctx context.Context, c *operat
 					Paths: []netv1.HTTPIngressPath{{
 						Path: "/", PathType: &pathType,
 						Backend: netv1.IngressBackend{Service: &netv1.IngressServiceBackend{
-							Name: svcName, Port: netv1.ServiceBackendPort{Number: backrestPort},
+							Name: backendName, Port: netv1.ServiceBackendPort{Number: backendPort},
 						}},
 					}},
 				}},
@@ -234,6 +247,15 @@ func (r *BackrestClusterReconciler) ensureIngress(ctx context.Context, c *operat
 	}
 	if c.Spec.Host.Ingress.ClassName != "" {
 		ing.Spec.IngressClassName = &c.Spec.Host.Ingress.ClassName
+	}
+	if len(c.Spec.Host.Ingress.TLS) > 0 {
+		b, err := jsonMarshal(c.Spec.Host.Ingress.TLS)
+		if err == nil {
+			var tls []netv1.IngressTLS
+			if jsonUnmarshal(b, &tls) == nil {
+				ing.Spec.TLS = tls
+			}
+		}
 	}
 	_ = controllerutil.SetControllerReference(c, ing, r.Scheme)
 	return r.createOrUpdateIngress(ctx, ing)
@@ -417,6 +439,10 @@ func (r *BackrestClusterReconciler) createOrUpdateIngress(ctx context.Context, d
 		return err
 	}
 	cur.Spec = desired.Spec
+	cur.Annotations = desired.Annotations
+	if desired.Labels != nil {
+		cur.Labels = desired.Labels
+	}
 	return r.Update(ctx, &cur)
 }
 
