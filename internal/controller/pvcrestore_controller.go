@@ -268,6 +268,21 @@ mkdir -p /work/out
 restic restore %s --target /work/out%s
 cd /work/out && tar -cf /work/archive.tar .
 `, snap, includeArgs)
+	if err := r.ensureRestoreRepoSecrets(ctx, restore, &repo, repoNS); err != nil {
+		return err
+	}
+	resticInit := corev1.Container{
+		Name:         "restic",
+		Image:        resticImage,
+		Command:      []string{"sh", "-c", resticScript},
+		Env:          resticEnv(&repo),
+		VolumeMounts: []corev1.VolumeMount{{Name: "work", MountPath: "/work"}},
+	}
+	if repo.Spec.EnvFromSecretRef != nil && repo.Spec.EnvFromSecretRef.Name != "" {
+		resticInit.EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: repo.Spec.EnvFromSecretRef.Name},
+		}}}
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
@@ -277,13 +292,7 @@ cd /work/out && tar -cf /work/archive.tar .
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					EnableServiceLinks: &enableLinks,
-					InitContainers: []corev1.Container{{
-						Name:         "restic",
-						Image:        resticImage,
-						Command:      []string{"sh", "-c", resticScript},
-						Env:          resticEnv(&repo),
-						VolumeMounts: []corev1.VolumeMount{{Name: "work", MountPath: "/work"}},
-					}},
+					InitContainers:     []corev1.Container{resticInit},
 					Containers: []corev1.Container{{
 						Name:    "export",
 						Image:   proxyImage,
@@ -410,6 +419,44 @@ func (r *PVCRestoreReconciler) ensureExportIngress(ctx context.Context, restore 
 		return err
 	}
 	return nil
+}
+
+func (r *PVCRestoreReconciler) ensureRestoreRepoSecrets(ctx context.Context, restore *operatorv1alpha1.PVCRestore, repo *operatorv1alpha1.BackupRepository, repoNS string) error {
+	if repoNS == restore.Namespace {
+		return nil
+	}
+	if err := r.mirrorSecret(ctx, repoNS, repo.Spec.PasswordSecretRef.Name, restore.Namespace, repo.Spec.PasswordSecretRef.Name); err != nil {
+		return err
+	}
+	if repo.Spec.EnvFromSecretRef != nil && repo.Spec.EnvFromSecretRef.Name != "" {
+		if err := r.mirrorSecret(ctx, repoNS, repo.Spec.EnvFromSecretRef.Name, restore.Namespace, repo.Spec.EnvFromSecretRef.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PVCRestoreReconciler) mirrorSecret(ctx context.Context, srcNS, srcName, dstNS, dstName string) error {
+	var src corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: srcNS, Name: srcName}, &src); err != nil {
+		return err
+	}
+	desired := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: dstName, Namespace: dstNS},
+		Type:       src.Type,
+		Data:       src.Data,
+	}
+	var cur corev1.Secret
+	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
+	if apierrors.IsNotFound(err) {
+		return r.Create(ctx, desired)
+	}
+	if err != nil {
+		return err
+	}
+	cur.Data = src.Data
+	cur.Type = src.Type
+	return r.Update(ctx, &cur)
 }
 
 func randomToken(n int) (string, error) {
