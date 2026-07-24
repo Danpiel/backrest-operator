@@ -24,6 +24,9 @@ func ToolSchemas() []ToolSchema {
 		toolSchema("get_pvc_restore", "Get PVCRestore status (includes exportURL)", `{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"}},"required":["namespace","name"]}`),
 		toolSchema("restore_export", "Create export restore Job and curl URL", `{"type":"object","properties":{"namespace":{"type":"string"},"repository_name":{"type":"string"},"repository_namespace":{"type":"string"},"snapshot_id":{"type":"string"},"path_filters":{"type":"array","items":{"type":"string"}},"ttl_seconds":{"type":"integer"}},"required":["namespace","repository_name"]}`),
 		toolSchema("repo_status", "Repository status summary", `{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"}},"required":["namespace","name"]}`),
+		toolSchema("list_snapshots", "List restic snapshots via Backrest host API for a synced BackupRepository", `{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"},"plan_id":{"type":"string"},"cluster_namespace":{"type":"string"},"cluster_name":{"type":"string"}},"required":["namespace","name"]}`),
+		toolSchema("get_host_config", "Get Backrest host config (repos/plans; secrets redacted)", `{"type":"object","properties":{"cluster_namespace":{"type":"string"},"cluster_name":{"type":"string"}},"required":[]}`),
+		toolSchema("index_repository", "Ask Backrest host to index snapshots for a repository", `{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"},"cluster_namespace":{"type":"string"},"cluster_name":{"type":"string"}},"required":["namespace","name"]}`),
 	}
 }
 

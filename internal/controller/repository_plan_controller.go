@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -63,7 +62,15 @@ func (r *BackupRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		_ = client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: repo.Namespace}}))
 		logger.Info("verify disabled, CronJob removed if present")
 	}
-	logger.V(1).Info("repository ready", "url", repo.Spec.URL, "verify", verifyEnabled)
+	if err := syncRepositoryToHost(ctx, r.Client, &repo); err != nil {
+		metrics.ReconcileErrors.WithLabelValues("BackupRepository").Inc()
+		logger.Error(err, "sync repository to Backrest host failed")
+		repo.Status.Phase = "Failed"
+		repo.Status.Conditions = []operatorv1alpha1.Condition{{Type: "SyncFailed", Status: "True", Message: err.Error()}}
+		_ = r.Status().Update(ctx, &repo)
+		return ctrl.Result{}, err
+	}
+	logger.V(1).Info("repository ready", "url", repo.Spec.URL, "verify", verifyEnabled, "syncToHost", repo.Spec.Backrest.SyncToHost)
 	return ctrl.Result{}, r.Status().Update(ctx, &repo)
 }
 
@@ -159,54 +166,31 @@ func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		plan.Status.Phase = "Failed"
 		return ctrl.Result{}, r.Status().Update(ctx, &plan)
 	}
-	targetNS := plan.Namespace
-	if plan.Spec.ClusterRef.Namespace != "" {
-		targetNS = plan.Spec.ClusterRef.Namespace
-	}
-	key := fmt.Sprintf("%s.%s.json", plan.Namespace, plan.Name)
-	fragmentObj := map[string]interface{}{
-		"id":        plan.Namespace + "-" + plan.Name,
-		"repo":      plan.Spec.RepositoryRef.Name,
-		"paths":     orStrings(plan.Spec.Paths),
-		"excludes":  orStrings(plan.Spec.Excludes),
-		"schedule":  plan.Spec.Schedule,
-		"retention": orMap(plan.Spec.Retention),
-		"hooks":     orHooks(plan.Spec.Hooks),
-		"tags":      orStrings(plan.Spec.Tags),
-	}
-	fragmentBytes, err := jsonMarshal(fragmentObj)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	fragment := string(fragmentBytes)
 
-	cmName := "backrest-plans"
-	var cm corev1.ConfigMap
-	err = r.Get(ctx, client.ObjectKey{Namespace: targetNS, Name: cmName}, &cm)
-	if apierrors.IsNotFound(err) {
-		cm = corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: targetNS},
-			Data:       map[string]string{key: fragment},
-		}
-		if err := r.Create(ctx, &cm); err != nil {
-			metrics.ReconcileErrors.WithLabelValues("BackupPlan").Inc()
-			logger.Error(err, "create plan ConfigMap failed", "configmap", cmName, "namespace", targetNS)
-			return ctrl.Result{}, err
-		}
-		logger.Info("wrote plan fragment (stub sync)", "configmap", cmName, "namespace", targetNS, "key", key)
-	} else if err != nil {
-		return ctrl.Result{}, err
-	} else {
-		if cm.Data == nil {
-			cm.Data = map[string]string{}
-		}
-		cm.Data[key] = fragment
-		if err := r.Update(ctx, &cm); err != nil {
-			logger.Error(err, "update plan ConfigMap failed", "configmap", cmName, "namespace", targetNS)
-			return ctrl.Result{}, err
-		}
-		logger.V(1).Info("updated plan fragment (stub sync)", "configmap", cmName, "key", key)
+	repoNS := plan.Spec.RepositoryRef.Namespace
+	if repoNS == "" {
+		repoNS = plan.Namespace
 	}
+	var repo operatorv1alpha1.BackupRepository
+	if err := r.Get(ctx, client.ObjectKey{Namespace: repoNS, Name: plan.Spec.RepositoryRef.Name}, &repo); err != nil {
+		logger.Error(err, "get repository for plan sync")
+		plan.Status.Phase = "Failed"
+		_ = r.Status().Update(ctx, &plan)
+		return ctrl.Result{}, err
+	}
+
+	if repo.Spec.Backrest.SyncToHost || plan.Spec.ClusterRef.Name != "" {
+		if err := syncPlanToHost(ctx, r.Client, &plan, &repo); err != nil {
+			metrics.ReconcileErrors.WithLabelValues("BackupPlan").Inc()
+			logger.Error(err, "sync plan to Backrest host failed")
+			plan.Status.Phase = "Failed"
+			_ = r.Status().Update(ctx, &plan)
+			return ctrl.Result{}, err
+		}
+	} else {
+		logger.Info("plan sync skipped (set BackupRepository.spec.backrest.syncToHost or plan.clusterRef)")
+	}
+
 	plan.Status.Phase = "Ready"
 	return ctrl.Result{}, r.Status().Update(ctx, &plan)
 }
@@ -214,20 +198,6 @@ func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func orStrings(v []string) []string {
 	if v == nil {
 		return []string{}
-	}
-	return v
-}
-
-func orMap(v map[string]interface{}) map[string]interface{} {
-	if v == nil {
-		return map[string]interface{}{}
-	}
-	return v
-}
-
-func orHooks(v []map[string]interface{}) []map[string]interface{} {
-	if v == nil {
-		return []map[string]interface{}{}
 	}
 	return v
 }

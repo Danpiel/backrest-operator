@@ -11,6 +11,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+
+	"github.com/Danpiel/backrest-operator/internal/backrest"
 )
 
 var (
@@ -167,9 +169,89 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 				"appendOnly": spec["appendOnly"],
 			},
 		}, nil
+	case "list_snapshots":
+		return t.listSnapshots(ctx, dc, ns, args)
+	case "get_host_config":
+		return t.getHostConfig(ctx, args)
+	case "index_repository":
+		return t.indexRepository(ctx, dc, ns, args)
 	default:
 		return nil, fmt.Errorf("unknown tool %s", name)
 	}
+}
+
+func (t *Tools) hostClientFromArgs(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}, repoName string) (*backrest.Client, string, error) {
+	clusterNS := strArg(args, "cluster_namespace", "")
+	clusterName := strArg(args, "cluster_name", "")
+	if clusterName == "" && repoName != "" {
+		obj, err := dc.Resource(gvrRepo).Namespace(ns).Get(ctx, repoName, metav1.GetOptions{})
+		if err != nil {
+			return nil, "", err
+		}
+		if v, ok, _ := unstructured.NestedString(obj.Object, "spec", "backrest", "clusterRef", "namespace"); ok && v != "" {
+			clusterNS = v
+		}
+		if v, ok, _ := unstructured.NestedString(obj.Object, "spec", "backrest", "clusterRef", "name"); ok && v != "" {
+			clusterName = v
+		}
+	}
+	if clusterNS == "" {
+		clusterNS = "backrest"
+	}
+	if clusterName == "" {
+		clusterName = "main"
+	}
+	return backrest.NewClient(backrest.HostURL(clusterNS, clusterName)), clusterName, nil
+}
+
+func (t *Tools) listSnapshots(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	name := strArg(args, "name", "")
+	planID := strArg(args, "plan_id", "")
+	bc, _, err := t.hostClientFromArgs(ctx, dc, ns, args, name)
+	if err != nil {
+		return nil, err
+	}
+	snaps, err := bc.ListSnapshots(ctx, name, planID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"repository": name, "planId": planID, "snapshots": snaps, "count": len(snaps)}, nil
+}
+
+func (t *Tools) getHostConfig(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	clusterNS := strArg(args, "cluster_namespace", "backrest")
+	clusterName := strArg(args, "cluster_name", "main")
+	bc := backrest.NewClient(backrest.HostURL(clusterNS, clusterName))
+	cfg, err := bc.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// Redact secrets before returning to MCP clients.
+	for i := range cfg.Repos {
+		if cfg.Repos[i].Password != "" {
+			cfg.Repos[i].Password = "***"
+		}
+		if len(cfg.Repos[i].Env) > 0 {
+			redacted := make([]string, len(cfg.Repos[i].Env))
+			for j := range cfg.Repos[i].Env {
+				redacted[j] = "***"
+			}
+			cfg.Repos[i].Env = redacted
+		}
+	}
+	return cfg, nil
+}
+
+func (t *Tools) indexRepository(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	name := strArg(args, "name", "")
+	bc, _, err := t.hostClientFromArgs(ctx, dc, ns, args, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := bc.IndexSnapshots(ctx, name); err != nil {
+		return nil, err
+	}
+	return map[string]string{"indexed": name}, nil
 }
 
 func bodyToUnstructured(body interface{}, kind, ns string) (*unstructured.Unstructured, error) {

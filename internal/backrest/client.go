@@ -1,0 +1,208 @@
+package backrest
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const defaultTimeout = 120 * time.Second
+
+// Client talks to a Backrest host over ConnectRPC JSON (HTTP POST /v1.Backrest/...).
+type Client struct {
+	BaseURL    string
+	HTTPClient *http.Client
+}
+
+func NewClient(baseURL string) *Client {
+	return &Client{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		HTTPClient: &http.Client{
+			Timeout: defaultTimeout,
+		},
+	}
+}
+
+// HostURL builds the in-cluster Service URL for a BackrestCluster.
+func HostURL(namespace, clusterName string) string {
+	return fmt.Sprintf("http://backrest-host-%s.%s.svc:9898", clusterName, namespace)
+}
+
+// PlanTag / InstanceTag match Backrest's restic tagging convention.
+func PlanTag(planID string) string       { return "plan:" + planID }
+func InstanceTag(instance string) string { return "created-by:" + instance }
+
+type Repo struct {
+	ID             string   `json:"id"`
+	URI            string   `json:"uri"`
+	Password       string   `json:"password,omitempty"`
+	Env            []string `json:"env,omitempty"`
+	Flags          []string `json:"flags,omitempty"`
+	AutoInitialize bool     `json:"autoInitialize,omitempty"`
+	Shared         bool     `json:"shared,omitempty"`
+	GUID           string   `json:"guid,omitempty"`
+}
+
+type Plan struct {
+	ID        string                 `json:"id"`
+	Repo      string                 `json:"repo"`
+	Paths     []string               `json:"paths,omitempty"`
+	Excludes  []string               `json:"excludes,omitempty"`
+	Schedule  map[string]interface{} `json:"schedule,omitempty"`
+	Retention map[string]interface{} `json:"retention,omitempty"`
+}
+
+type Config struct {
+	Modno    int                    `json:"modno,omitempty"`
+	Version  int                    `json:"version,omitempty"`
+	Instance string                 `json:"instance,omitempty"`
+	Repos     []Repo                 `json:"repos,omitempty"`
+	Plans    []Plan                 `json:"plans,omitempty"`
+	Auth     map[string]interface{} `json:"auth,omitempty"`
+	Sync     map[string]interface{} `json:"sync,omitempty"`
+}
+
+func (c *Client) post(ctx context.Context, method string, body any, out any) error {
+	var buf bytes.Buffer
+	if body == nil {
+		buf.WriteString("{}")
+	} else if err := json.NewEncoder(&buf).Encode(body); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1.Backrest/"+method, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("backrest %s: HTTP %d: %s", method, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, out)
+}
+
+func (c *Client) GetConfig(ctx context.Context) (*Config, error) {
+	var cfg Config
+	if err := c.post(ctx, "GetConfig", map[string]any{}, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (c *Client) SetConfig(ctx context.Context, cfg *Config) (*Config, error) {
+	var out Config
+	if err := c.post(ctx, "SetConfig", cfg, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// EnsureInstance sets Config.instance when empty or mismatched.
+func (c *Client) EnsureInstance(ctx context.Context, instance string) error {
+	if instance == "" {
+		return fmt.Errorf("instance is required")
+	}
+	cfg, err := c.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if cfg.Instance == instance {
+		return nil
+	}
+	cfg.Instance = instance
+	_, err = c.SetConfig(ctx, cfg)
+	return err
+}
+
+// UpsertRepo adds or updates a repository. Caller must EnsureInstance first.
+func (c *Client) UpsertRepo(ctx context.Context, repo Repo) error {
+	cfg, err := c.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if cfg.Instance == "" {
+		return fmt.Errorf("backrest instance is not set; call EnsureInstance first")
+	}
+	for i, existing := range cfg.Repos {
+		if existing.ID == repo.ID {
+			if repo.GUID == "" {
+				repo.GUID = existing.GUID
+			}
+			cfg.Repos[i] = repo
+			_, err = c.SetConfig(ctx, cfg)
+			return err
+		}
+	}
+	return c.post(ctx, "AddRepo", map[string]any{"repo": repo}, &Config{})
+}
+
+// UpsertPlan merges a plan into the host config.
+func (c *Client) UpsertPlan(ctx context.Context, plan Plan) error {
+	cfg, err := c.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if cfg.Instance == "" {
+		return fmt.Errorf("backrest instance is not set")
+	}
+	if plan.Schedule == nil {
+		plan.Schedule = map[string]interface{}{"disabled": true}
+	}
+	found := false
+	for i, p := range cfg.Plans {
+		if p.ID == plan.ID {
+			cfg.Plans[i] = plan
+			found = true
+			break
+		}
+	}
+	if !found {
+		cfg.Plans = append(cfg.Plans, plan)
+	}
+	_, err = c.SetConfig(ctx, cfg)
+	return err
+}
+
+func (c *Client) IndexSnapshots(ctx context.Context, repoID string) error {
+	return c.post(ctx, "DoRepoTask", map[string]any{
+		"repoId": repoID,
+		"task":   "TASK_INDEX_SNAPSHOTS",
+	}, nil)
+}
+
+func (c *Client) ListSnapshots(ctx context.Context, repoID, planID string) ([]map[string]any, error) {
+	body := map[string]any{"repoId": repoID}
+	if planID != "" {
+		body["planId"] = planID
+	}
+	var out struct {
+		Snapshots []map[string]any `json:"snapshots"`
+	}
+	if err := c.post(ctx, "ListSnapshots", body, &out); err != nil {
+		return nil, err
+	}
+	return out.Snapshots, nil
+}
+
+func (c *Client) ClearRepoHistory(ctx context.Context, repoID string) error {
+	return c.post(ctx, "ClearHistory", map[string]any{
+		"selector":   map[string]any{"repoId": repoID},
+		"onlyFailed": false,
+	}, nil)
+}

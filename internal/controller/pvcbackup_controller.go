@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
+	"github.com/Danpiel/backrest-operator/internal/backrest"
 	"github.com/Danpiel/backrest-operator/internal/filters"
 	"github.com/Danpiel/backrest-operator/internal/metrics"
 )
@@ -74,6 +75,16 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				backup.Status.Phase = "Scheduled"
 				_ = r.Status().Update(ctx, &backup)
 				logger.Info("scheduled, waiting for next run", "schedule", backup.Spec.Schedule, "requeueAfter", wait.String())
+			}
+			repoNS := backup.Spec.RepositoryRef.Namespace
+			if repoNS == "" {
+				repoNS = backup.Namespace
+			}
+			var repo operatorv1alpha1.BackupRepository
+			if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err == nil {
+				if err := syncPVCBackupPlanToHost(ctx, r.Client, &backup, &repo); err != nil {
+					logger.Error(err, "sync plan to Backrest host while waiting")
+				}
 			}
 			if wait <= 0 {
 				wait = time.Minute
@@ -210,6 +221,18 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
 		metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
 		logger.Info("backup completed", "phase", backup.Status.Phase, "lastBackupTime", backup.Status.LastBackupTime)
+
+		repoNS := backup.Spec.RepositoryRef.Namespace
+		if repoNS == "" {
+			repoNS = backup.Namespace
+		}
+		var repo operatorv1alpha1.BackupRepository
+		if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err == nil {
+			if err := syncPVCBackupPlanToHost(ctx, r.Client, backup, &repo); err != nil {
+				logger.Error(err, "sync plan/index to Backrest host after backup")
+			}
+		}
+
 		if err := r.Status().Update(ctx, backup); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -564,8 +587,25 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 	for _, ex := range b.Spec.Excludes {
 		cmd[2] += " --exclude " + shellQuoteOne(ex)
 	}
+	// Tag so Backrest UI associates snapshots with the synced plan/instance.
+	planID := planIDForPVCBackup(b)
+	instance := "main"
+	if b.Spec.RepositoryRef.Namespace != "" || b.Spec.RepositoryRef.Name != "" {
+		// Prefer BackrestCluster name from repo sync target when available at Job create time.
+		var repo operatorv1alpha1.BackupRepository
+		repoNS := b.Spec.RepositoryRef.Namespace
+		if repoNS == "" {
+			repoNS = b.Namespace
+		}
+		if err := r.Get(ctx, types.NamespacedName{Name: b.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err == nil {
+			_, clusterName := resolveClusterRef(repo.Spec.Backrest.ClusterRef, repo.Namespace)
+			instance = instanceForCluster(clusterName)
+		}
+	}
+	cmd[2] += " --tag " + shellQuoteOne(backrest.PlanTag(planID))
+	cmd[2] += " --tag " + shellQuoteOne(backrest.InstanceTag(instance))
 	if b.Spec.Retention.KeepLast != nil {
-		cmd[2] += fmt.Sprintf(" && restic forget --keep-last %d --prune", *b.Spec.Retention.KeepLast)
+		cmd[2] += fmt.Sprintf(" && restic forget --tag %s --keep-last %d --prune", shellQuoteOne(backrest.PlanTag(planID)), *b.Spec.Retention.KeepLast)
 	}
 
 	env := resticEnv(repo)
