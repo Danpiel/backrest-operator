@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 type rpcRequest struct {
@@ -67,16 +68,25 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 				allow = v
 			}
 		}
+		userName := ""
+		if user != nil {
+			userName = user.Username
+		}
+		log := ctrl.LoggerFrom(ctx).WithName("mcp").WithValues("tool", params.Name, "namespace", ns, "user", userName)
 		if !s.Auth.AuthorizeTool(ctx, user, params.Name, ns, allow) {
+			log.Info("tool denied")
 			return rpcError(req.ID, 403, fmt.Sprintf("forbidden: %s", params.Name)), http.StatusForbidden
 		}
+		log.Info("tool call")
 		result, err := s.Tools.Call(ctx, user, params.Name, params.Arguments)
 		if err != nil {
+			log.Error(err, "tool failed")
 			if strings.Contains(err.Error(), "allow_destructive") {
 				return rpcError(req.ID, 403, err.Error()), http.StatusForbidden
 			}
 			return rpcError(req.ID, 500, err.Error()), http.StatusInternalServerError
 		}
+		log.Info("tool ok")
 		text, _ := json.Marshal(result)
 		return rpcResult(req.ID, map[string]interface{}{
 			"content": []map[string]string{{"type": "text", "text": string(text)}},

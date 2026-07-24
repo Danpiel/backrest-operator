@@ -41,12 +41,13 @@ type PVCBackupReconciler struct {
 }
 
 func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithValues("pvcbackup", req.NamespacedName)
 	var backup operatorv1alpha1.PVCBackup
 	if err := r.Get(ctx, req.NamespacedName, &backup); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !filters.ObjectAllowed(backup.Namespace, backup.Labels) {
+		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
 
@@ -72,12 +73,14 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if backup.Status.Phase != "Scheduled" {
 				backup.Status.Phase = "Scheduled"
 				_ = r.Status().Update(ctx, &backup)
+				logger.Info("scheduled, waiting for next run", "schedule", backup.Spec.Schedule, "requeueAfter", wait.String())
 			}
 			if wait <= 0 {
 				wait = time.Minute
 			}
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
+		logger.Info("schedule due, starting backup", "schedule", backup.Spec.Schedule)
 	} else if backup.Status.Phase == "Succeeded" {
 		return ctrl.Result{}, nil
 	}
@@ -91,6 +94,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return
 		}
 		if !backup.Spec.Quiesce.LeaveDown && len(quiesceState) > 0 {
+			logger.Info("restoring workloads after failed/aborted run")
 			_ = r.unquiesce(ctx, backup.Namespace, quiesceState)
 		}
 	}()
@@ -99,6 +103,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if len(pipeline) == 0 {
 		pipeline = []string{"quiescedLive"}
 	}
+	logger.Info("backup run started", "pvcs", pvcs, "pipeline", pipeline, "repository", backup.Spec.RepositoryRef.Name)
 
 	repoNS := backup.Spec.RepositoryRef.Namespace
 	if repoNS == "" {
@@ -121,11 +126,13 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if needQuiesce {
 		backup.Status.Phase = "Quiescing"
 		_ = r.Status().Update(ctx, &backup)
+		logger.Info("quiescing workloads", "targets", len(backup.Spec.Quiesce.Targets))
 		var err error
 		quiesceState, err = r.quiesce(ctx, &backup)
 		if err != nil {
 			return r.fail(ctx, &backup, err)
 		}
+		logger.Info("workloads quiesced", "scaled", len(quiesceState))
 	}
 
 	uploadPVCs := pvcs
@@ -142,6 +149,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			backup.Status.Phase = "Snapshotting"
 			_ = r.Status().Update(ctx, &backup)
 			snapName = fmt.Sprintf("%s-%d", backup.Name, started.Unix())
+			logger.Info("creating volume snapshot", "snapshot", snapName, "pvc", primaryPVC, "class", backup.Spec.VolumeSnapshotClassName)
 			if err := r.createSnapshot(ctx, &backup, snapName, primaryPVC); err != nil {
 				return r.fail(ctx, &backup, err)
 			}
@@ -149,6 +157,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 				return r.fail(ctx, &backup, err)
 			}
 			clone := fmt.Sprintf("%s-clone-%d", backup.Name, started.Unix())
+			logger.Info("cloning PVC from snapshot", "clone", clone, "snapshot", snapName)
 			if err := r.cloneFromSnapshot(ctx, &backup, snapName, clone, primaryPVC); err != nil {
 				return r.fail(ctx, &backup, err)
 			}
@@ -165,6 +174,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
 	}
+	logger.Info("creating restic job", "job", jobName, "pvcs", uploadPVCs, "repoURL", repo.Spec.URL)
 	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVCs); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
@@ -178,7 +188,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operatorv1alpha1.PVCBackup) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithValues("pvcbackup", client.ObjectKeyFromObject(backup), "job", backup.Status.LastJobName)
 	jobName := backup.Status.LastJobName
 	var job batchv1.Job
 	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: backup.Namespace}, &job); err != nil {
@@ -186,6 +196,7 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		return r.fail(ctx, backup, fmt.Errorf("restic job %s: %w", jobName, err))
 	}
 	if job.Status.Succeeded > 0 {
+		logger.Info("restic job succeeded, restoring workloads")
 		_ = r.releaseQuiesce(ctx, backup)
 		if force := backup.Annotations[annForceRun]; force != "" {
 			backup.Status.LastForceRun = force
@@ -198,6 +209,7 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		backup.Status.LastJobName = jobName
 		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
 		metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
+		logger.Info("backup completed", "phase", backup.Status.Phase, "lastBackupTime", backup.Status.LastBackupTime)
 		if err := r.Status().Update(ctx, backup); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -211,11 +223,12 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		return ctrl.Result{}, nil
 	}
 	if job.Status.Failed > 0 {
+		logger.Info("restic job failed, restoring workloads")
 		_ = r.releaseQuiesce(ctx, backup)
 		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "failure").Inc()
 		return r.fail(ctx, backup, fmt.Errorf("restic job failed"))
 	}
-	logger.Info("waiting for restic job", "job", jobName)
+	logger.V(1).Info("restic job still running")
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
@@ -360,6 +373,7 @@ func (r *PVCBackupReconciler) mirrorSecret(ctx context.Context, srcNS, srcName, 
 }
 
 func (r *PVCBackupReconciler) fail(ctx context.Context, b *operatorv1alpha1.PVCBackup, err error) (ctrl.Result, error) {
+	log.FromContext(ctx).Error(err, "backup failed", "pvcbackup", client.ObjectKeyFromObject(b))
 	metrics.ReconcileErrors.WithLabelValues("PVCBackup").Inc()
 	metrics.BackupTotal.WithLabelValues(b.Namespace, b.Name, "failure").Inc()
 	b.Status.Phase = "Failed"

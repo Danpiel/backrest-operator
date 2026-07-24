@@ -13,9 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/Danpiel/backrest-operator/internal/logging"
 	"github.com/Danpiel/backrest-operator/internal/mcp"
 )
 
@@ -37,39 +36,48 @@ func main() {
 	flag.StringVar(&mode, "mode", envOr("MCP_MODE", "http"), "http or stdio")
 	flag.StringVar(&listenAddr, "listen", envAddr("MCP_PORT", ":8081"), "HTTP listen address")
 	flag.StringVar(&metricsAddr, "metrics", envAddr("METRICS_PORT", ":8080"), "metrics listen address")
-	opts := zap.Options{Development: true}
-	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-	log := ctrl.Log.WithName("mcp")
+
+	log := logging.Setup("mcp", logging.FromEnv())
+	log.Info("starting backrest-mcp",
+		"mode", mode,
+		"listen", listenAddr,
+		"metrics", metricsAddr,
+		"logFormat", envOr("LOG_FORMAT", "console"),
+		"logLevel", envOr("LOG_LEVEL", "info"),
+	)
 
 	cfg, err := restConfig()
 	if err != nil {
-		log.Error(err, "kubeconfig")
+		log.Error(err, "load kubeconfig")
 		os.Exit(1)
 	}
 
 	srv, err := mcp.NewServer(cfg, func(tool string) {
 		authDenials.WithLabelValues(tool).Inc()
+		log.Info("auth denied", "tool", tool)
 	})
 	if err != nil {
-		log.Error(err, "create mcp server")
+		log.Error(err, "create MCP server")
 		os.Exit(1)
 	}
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
-		_ = http.ListenAndServe(metricsAddr, mux)
+		log.Info("metrics listening", "addr", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+			log.Error(err, "metrics server stopped")
+		}
 	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	if mode == "stdio" {
-		log.Info("starting MCP stdio")
+		log.Info("serving MCP over stdio")
 		if err := srv.RunStdio(ctx); err != nil {
-			log.Error(err, "stdio")
+			log.Error(err, "stdio stopped")
 			os.Exit(1)
 		}
 		return
@@ -78,11 +86,12 @@ func main() {
 	httpSrv := &http.Server{Addr: listenAddr, Handler: srv.HTTPHandler()}
 	go func() {
 		<-ctx.Done()
+		log.Info("shutting down HTTP server")
 		_ = httpSrv.Shutdown(context.Background())
 	}()
-	log.Info("starting MCP HTTP", "addr", listenAddr)
+	log.Info("serving MCP over HTTP", "addr", listenAddr)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Error(err, "http server")
+		log.Error(err, "HTTP server stopped")
 		os.Exit(1)
 	}
 }

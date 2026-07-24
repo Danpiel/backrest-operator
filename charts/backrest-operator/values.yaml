@@ -16,6 +16,9 @@ operator:
     repository: ghcr.io/danpiel/backrest-operator
     tag: ""
     pullPolicy: IfNotPresent
+  logging:
+    format: console   # console | json
+    level: info       # debug | info | warn | error
   serviceAccount:
     create: true
     name: ""
@@ -51,6 +54,9 @@ mcp:
     repository: ghcr.io/danpiel/backrest-mcp
     tag: ""
     pullPolicy: IfNotPresent
+  logging:
+    format: console
+    level: info
   serviceAccount:
     create: true
     name: ""

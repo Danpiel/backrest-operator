@@ -17,12 +17,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
 	"github.com/Danpiel/backrest-operator/internal/controller"
 	"github.com/Danpiel/backrest-operator/internal/filters"
+	"github.com/Danpiel/backrest-operator/internal/logging"
 	"github.com/Danpiel/backrest-operator/internal/webhook"
 )
 
@@ -48,11 +48,16 @@ func main() {
 	flag.BoolVar(&enableWebhooks, "enable-webhooks", envBool("WEBHOOK_ENABLED", true), "enable validating webhooks")
 	flag.StringVar(&webhookAddr, "webhook-bind-address", envAddr("WEBHOOK_PORT", ":9443"), "webhook listen address")
 	flag.StringVar(&webhookCertDir, "webhook-cert-dir", envOr("WEBHOOK_CERT_DIR", "/tls"), "TLS cert directory (tls.crt/tls.key)")
-	opts := zap.Options{Development: true}
-	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
-	setupLog := ctrl.Log.WithName("setup")
+
+	setupLog := logging.Setup("operator", logging.FromEnv())
+	setupLog.Info("starting backrest-operator",
+		"logFormat", envOr("LOG_FORMAT", "console"),
+		"logLevel", envOr("LOG_LEVEL", "info"),
+		"metrics", metricsAddr,
+		"health", probeAddr,
+		"webhooks", enableWebhooks,
+	)
 
 	mgrOpts := ctrl.Options{
 		Scheme:                 scheme,
@@ -66,6 +71,7 @@ func main() {
 			namespaces[n] = cache.Config{}
 		}
 		mgrOpts.Cache = cache.Options{DefaultNamespaces: namespaces}
+		setupLog.Info("watch filter enabled", "namespaces", ns)
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
@@ -75,25 +81,26 @@ func main() {
 	}
 
 	if err := (&controller.BackrestClusterReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "cluster controller")
+		setupLog.Error(err, "register controller", "name", "BackrestCluster")
 		os.Exit(1)
 	}
 	if err := (&controller.BackupRepositoryReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "repository controller")
+		setupLog.Error(err, "register controller", "name", "BackupRepository")
 		os.Exit(1)
 	}
 	if err := (&controller.BackupPlanReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "plan controller")
+		setupLog.Error(err, "register controller", "name", "BackupPlan")
 		os.Exit(1)
 	}
 	if err := (&controller.PVCBackupReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "pvcbackup controller")
+		setupLog.Error(err, "register controller", "name", "PVCBackup")
 		os.Exit(1)
 	}
 	if err := (&controller.PVCRestoreReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "pvcrestore controller")
+		setupLog.Error(err, "register controller", "name", "PVCRestore")
 		os.Exit(1)
 	}
+	setupLog.Info("controllers registered")
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "healthz")
@@ -111,20 +118,20 @@ func main() {
 			key := webhookCertDir + "/tls.key"
 			if _, err := os.Stat(cert); err == nil {
 				srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-				setupLog.Info("webhook listening TLS", "addr", webhookAddr)
+				setupLog.Info("webhook listening", "addr", webhookAddr, "tls", true)
 				if err := srv.ListenAndServeTLS(cert, key); err != nil {
-					setupLog.Error(err, "webhook server")
+					setupLog.Error(err, "webhook server stopped")
 				}
 			} else {
-				setupLog.Info("webhook listening plaintext", "addr", webhookAddr)
+				setupLog.Info("webhook listening", "addr", webhookAddr, "tls", false)
 				if err := srv.ListenAndServe(); err != nil {
-					setupLog.Error(err, "webhook server")
+					setupLog.Error(err, "webhook server stopped")
 				}
 			}
 		}()
 	}
 
-	setupLog.Info("starting Go backrest-operator")
+	setupLog.Info("manager running")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "manager stopped")
 		os.Exit(1)
@@ -153,7 +160,6 @@ func envOr(key, def string) string {
 	return def
 }
 
-// envAddr accepts ":8080" or "8080" / "9443" from Helm env vars.
 func envAddr(key, def string) string {
 	v := os.Getenv(key)
 	if v == "" {

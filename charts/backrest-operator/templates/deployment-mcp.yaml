@@ -47,6 +47,10 @@ spec:
               value: {{ .Values.mcp.service.port | quote }}
             - name: METRICS_PORT
               value: {{ .Values.mcp.service.metricsPort | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.mcp.logging.format | default "console" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.mcp.logging.level | default "info" | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

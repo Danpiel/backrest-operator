@@ -27,15 +27,17 @@ type BackupRepositoryReconciler struct {
 }
 
 func (r *BackupRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithValues("backuprepository", req.NamespacedName)
 	var repo operatorv1alpha1.BackupRepository
 	if err := r.Get(ctx, req.NamespacedName, &repo); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !filters.ObjectAllowed(repo.Namespace, repo.Labels) {
+		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
 	if repo.Spec.URL == "" || repo.Spec.PasswordSecretRef.Name == "" {
+		logger.Info("invalid repository spec", "reason", "url and passwordSecretRef required")
 		repo.Status.Phase = "Failed"
 		repo.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Invalid", Status: "True", Message: "url and passwordSecretRef required"}}
 		_ = r.Status().Update(ctx, &repo)
@@ -51,14 +53,17 @@ func (r *BackupRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		repo.Status.LastCheckResult = "scheduled"
 		if err := r.ensureCheckCron(ctx, &repo); err != nil {
 			metrics.ReconcileErrors.WithLabelValues("BackupRepository").Inc()
-			logger.Error(err, "ensure check cron")
+			logger.Error(err, "ensure restic check CronJob failed")
 			return ctrl.Result{}, err
 		}
+		logger.V(1).Info("verify CronJob ensured", "url", repo.Spec.URL)
 	} else {
 		repo.Status.LastCheckResult = "skipped"
 		name := "restic-check-" + repo.Name
 		_ = client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: repo.Namespace}}))
+		logger.Info("verify disabled, CronJob removed if present")
 	}
+	logger.V(1).Info("repository ready", "url", repo.Spec.URL, "verify", verifyEnabled)
 	return ctrl.Result{}, r.Status().Update(ctx, &repo)
 }
 
@@ -140,14 +145,17 @@ type BackupPlanReconciler struct {
 }
 
 func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("backupplan", req.NamespacedName)
 	var plan operatorv1alpha1.BackupPlan
 	if err := r.Get(ctx, req.NamespacedName, &plan); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !filters.ObjectAllowed(plan.Namespace, plan.Labels) {
+		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
 	if plan.Spec.RepositoryRef.Name == "" {
+		logger.Info("invalid plan spec", "reason", "repositoryRef.name required")
 		plan.Status.Phase = "Failed"
 		return ctrl.Result{}, r.Status().Update(ctx, &plan)
 	}
@@ -182,8 +190,10 @@ func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		if err := r.Create(ctx, &cm); err != nil {
 			metrics.ReconcileErrors.WithLabelValues("BackupPlan").Inc()
+			logger.Error(err, "create plan ConfigMap failed", "configmap", cmName, "namespace", targetNS)
 			return ctrl.Result{}, err
 		}
+		logger.Info("wrote plan fragment (stub sync)", "configmap", cmName, "namespace", targetNS, "key", key)
 	} else if err != nil {
 		return ctrl.Result{}, err
 	} else {
@@ -192,8 +202,10 @@ func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		cm.Data[key] = fragment
 		if err := r.Update(ctx, &cm); err != nil {
+			logger.Error(err, "update plan ConfigMap failed", "configmap", cmName, "namespace", targetNS)
 			return ctrl.Result{}, err
 		}
+		logger.V(1).Info("updated plan fragment (stub sync)", "configmap", cmName, "key", key)
 	}
 	plan.Status.Phase = "Ready"
 	return ctrl.Result{}, r.Status().Update(ctx, &plan)

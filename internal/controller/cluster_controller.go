@@ -35,24 +35,25 @@ type BackrestClusterReconciler struct {
 }
 
 func (r *BackrestClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithValues("backrestcluster", req.NamespacedName)
 	var cluster operatorv1alpha1.BackrestCluster
 	if err := r.Get(ctx, req.NamespacedName, &cluster); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !filters.ObjectAllowed(cluster.Namespace, cluster.Labels) {
+		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
 
 	if err := r.ensureHost(ctx, &cluster); err != nil {
 		metrics.ReconcileErrors.WithLabelValues("BackrestCluster").Inc()
-		logger.Error(err, "ensure host")
+		logger.Error(err, "ensure host failed")
 		return r.patchStatus(ctx, &cluster, "Failed", false, 0, 0, 0)
 	}
 	agentsReady, agentsDesired, err := r.ensureAgents(ctx, &cluster)
 	if err != nil {
 		metrics.ReconcileErrors.WithLabelValues("BackrestCluster").Inc()
-		logger.Error(err, "ensure agents")
+		logger.Error(err, "ensure agents failed")
 		return r.patchStatus(ctx, &cluster, "Failed", false, agentsReady, agentsDesired, 0)
 	}
 	hostReady := r.isHostReady(ctx, &cluster)
@@ -65,6 +66,10 @@ func (r *BackrestClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	paired := int32(0)
 	if hostReady {
 		paired = agentsReady
+	}
+	logger.V(1).Info("reconciled", "phase", phase, "hostReady", hostReady, "agentsReady", agentsReady, "agentsDesired", agentsDesired)
+	if phase == "Degraded" || phase == "Failed" {
+		logger.Info("cluster not ready", "phase", phase, "hostReady", hostReady, "agents", fmt.Sprintf("%d/%d", agentsReady, agentsDesired))
 	}
 	return r.patchStatus(ctx, &cluster, phase, hostReady, agentsReady, agentsDesired, paired)
 }

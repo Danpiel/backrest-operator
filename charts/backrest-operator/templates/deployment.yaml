@@ -60,6 +60,10 @@ spec:
               value: /tls/tls.crt
             - name: WEBHOOK_KEY
               value: /tls/tls.key
+            - name: LOG_FORMAT
+              value: {{ .Values.operator.logging.format | default "console" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.operator.logging.level | default "info" | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:

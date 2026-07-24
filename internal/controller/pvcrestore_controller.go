@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
 	"github.com/Danpiel/backrest-operator/internal/filters"
@@ -30,11 +31,13 @@ type PVCRestoreReconciler struct {
 }
 
 func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("pvcrestore", req.NamespacedName)
 	var restore operatorv1alpha1.PVCRestore
 	if err := r.Get(ctx, req.NamespacedName, &restore); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !filters.ObjectAllowed(restore.Namespace, restore.Labels) {
+		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
 	if restore.Status.Phase == "Succeeded" {
@@ -42,6 +45,7 @@ func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	mode := restore.Spec.Mode
+	logger.Info("restore started", "mode", mode)
 	switch mode {
 	case "fromVolumeSnapshot":
 		if err := r.restoreFromSnapshot(ctx, &restore); err != nil {
@@ -59,10 +63,12 @@ func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.fail(ctx, &restore, fmt.Errorf("unknown mode %s", mode))
 	}
 	restore.Status.Phase = "Succeeded"
+	logger.Info("restore finished", "mode", mode, "exportURL", restore.Status.ExportURL, "job", restore.Status.LastJobName)
 	return ctrl.Result{}, r.Status().Update(ctx, &restore)
 }
 
 func (r *PVCRestoreReconciler) fail(ctx context.Context, restore *operatorv1alpha1.PVCRestore, err error) (ctrl.Result, error) {
+	log.FromContext(ctx).Error(err, "restore failed", "pvcrestore", client.ObjectKeyFromObject(restore))
 	metrics.ReconcileErrors.WithLabelValues("PVCRestore").Inc()
 	restore.Status.Phase = "Failed"
 	restore.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Failed", Status: "True", Message: err.Error()}}
@@ -243,6 +249,8 @@ func (r *PVCRestoreReconciler) restoreExport(ctx context.Context, restore *opera
 		corev1.EnvVar{Name: "EXPORT_TOKEN", Value: token},
 		corev1.EnvVar{Name: "EXPORT_ONESHOT", Value: "1"},
 		corev1.EnvVar{Name: "EXPORT_FILE", Value: "/work/archive.tar"},
+		corev1.EnvVar{Name: "LOG_FORMAT", Value: firstNonEmpty(os.Getenv("LOG_FORMAT"), "console")},
+		corev1.EnvVar{Name: "LOG_LEVEL", Value: firstNonEmpty(os.Getenv("LOG_LEVEL"), "info")},
 	)
 	resticScript := fmt.Sprintf(`set -euo pipefail
 mkdir -p /work/out
@@ -324,6 +332,15 @@ func exportProxyImage() string {
 		return v
 	}
 	return "ghcr.io/danpiel/backrest-operator:latest"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (r *PVCRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
