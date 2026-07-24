@@ -276,6 +276,7 @@ func (r *BackrestClusterReconciler) ensureAgents(ctx context.Context, c *operato
 		}},
 		Volumes:      []corev1.Volume{{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 		NodeSelector: c.Spec.Agents.NodeSelector,
+		Tolerations:  mapsToTolerations(c.Spec.Agents.Tolerations),
 	}
 	mode := c.Spec.Agents.Mode
 	if mode == "" {
@@ -342,6 +343,21 @@ func (r *BackrestClusterReconciler) createOrIgnore(ctx context.Context, obj clie
 		return nil
 	}
 	return err
+}
+
+func mapsToTolerations(in []map[string]interface{}) []corev1.Toleration {
+	if len(in) == 0 {
+		return nil
+	}
+	b, err := jsonMarshal(in)
+	if err != nil {
+		return nil
+	}
+	var out []corev1.Toleration
+	if err := jsonUnmarshal(b, &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func (r *BackrestClusterReconciler) createOrUpdateDep(ctx context.Context, desired *appsv1.Deployment) error {
