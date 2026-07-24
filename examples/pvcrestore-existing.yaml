@@ -1,0 +1,22 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCRestore
+metadata:
+  name: restore-app-data
+  namespace: app
+spec:
+  mode: fromResticToExistingPVC
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  restic:
+    snapshotID: latest
+    pathFilters: []
+  target:
+    existingPVCName: app-data
+  quiesce:
+    enabled: true
+    timeoutSeconds: 900
+    targets:
+      - kind: Deployment
+        name: my-app
+        action: scaleToZero

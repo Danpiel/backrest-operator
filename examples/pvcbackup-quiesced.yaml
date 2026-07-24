@@ -1,0 +1,26 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCBackup
+metadata:
+  name: app-data-quiesced
+  namespace: app
+  annotations:
+    operator.backrest.io/leave-down-confirmed: "true"
+spec:
+  pvcName: app-data
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  strategy:
+    pipeline:
+      - quiescedLive
+  quiesce:
+    enabled: true
+    timeoutSeconds: 900
+    leaveDown: true
+    targets:
+      - kind: Deployment
+        name: my-app
+        action: scaleToZero
+  paths:
+    - /var/lib/myapp
+  ttlSecondsAfterFinished: 86400

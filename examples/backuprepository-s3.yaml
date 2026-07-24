@@ -1,0 +1,22 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackupRepository
+metadata:
+  name: primary
+  namespace: backrest-system
+spec:
+  url: s3:https://s3.example.com/my-bucket/backups
+  passwordSecretRef:
+    name: backup-repo
+    key: RESTIC_PASSWORD
+  envFromSecretRef:
+    name: backup-repo-env
+  appendOnly: false
+  verify:
+    enabled: true
+    schedule: "0 3 * * 0"
+  shared: true
+  backrest:
+    syncToHost: true
+    clusterRef:
+      name: main
+      namespace: backrest-system

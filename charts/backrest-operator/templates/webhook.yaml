@@ -1,0 +1,130 @@
+{{- if .Values.operator.webhook.enabled }}
+{{- if .Values.operator.webhook.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "backrest-operator.webhookCertSecretName" . }}
+  namespace: {{ include "backrest-operator.namespace" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "backrest-operator.webhookCertSecretName" . }}
+  duration: {{ .Values.operator.webhook.certManager.duration }}
+  renewBefore: {{ .Values.operator.webhook.certManager.renewBefore }}
+  issuerRef:
+    {{- toYaml .Values.operator.webhook.certManager.issuerRef | nindent 4 }}
+  dnsNames:
+    - {{ include "backrest-operator.webhookServiceName" . }}
+    - {{ printf "%s.%s.svc" (include "backrest-operator.webhookServiceName" .) (include "backrest-operator.namespace" .) }}
+    - {{ printf "%s.%s.svc.cluster.local" (include "backrest-operator.webhookServiceName" .) (include "backrest-operator.namespace" .) }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "backrest-operator.webhookServiceName" . }}
+  namespace: {{ include "backrest-operator.namespace" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "backrest-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "backrest-operator.fullname" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+  {{- if .Values.operator.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ include "backrest-operator.namespace" . }}/{{ include "backrest-operator.webhookCertSecretName" . }}
+  {{- end }}
+webhooks:
+  - name: vbackrestcluster.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "backrest-operator.webhookServiceName" . }}
+        namespace: {{ include "backrest-operator.namespace" . }}
+        path: /validate-operator-backrest-io-v1alpha1-backrestcluster
+        port: 443
+    rules:
+      - apiGroups: ["operator.backrest.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["backrestclusters"]
+        scope: Namespaced
+  - name: vbackuprepository.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "backrest-operator.webhookServiceName" . }}
+        namespace: {{ include "backrest-operator.namespace" . }}
+        path: /validate-operator-backrest-io-v1alpha1-backuprepository
+        port: 443
+    rules:
+      - apiGroups: ["operator.backrest.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["backuprepositories"]
+        scope: Namespaced
+  - name: vbackupplan.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "backrest-operator.webhookServiceName" . }}
+        namespace: {{ include "backrest-operator.namespace" . }}
+        path: /validate-operator-backrest-io-v1alpha1-backupplan
+        port: 443
+    rules:
+      - apiGroups: ["operator.backrest.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["backupplans"]
+        scope: Namespaced
+  - name: vpvcbackup.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "backrest-operator.webhookServiceName" . }}
+        namespace: {{ include "backrest-operator.namespace" . }}
+        path: /validate-operator-backrest-io-v1alpha1-pvcbackup
+        port: 443
+    rules:
+      - apiGroups: ["operator.backrest.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pvcbackups"]
+        scope: Namespaced
+  - name: vpvcrestore.kb.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    clientConfig:
+      service:
+        name: {{ include "backrest-operator.webhookServiceName" . }}
+        namespace: {{ include "backrest-operator.namespace" . }}
+        path: /validate-operator-backrest-io-v1alpha1-pvcrestore
+        port: 443
+    rules:
+      - apiGroups: ["operator.backrest.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pvcrestores"]
+        scope: Namespaced
+{{- end }}

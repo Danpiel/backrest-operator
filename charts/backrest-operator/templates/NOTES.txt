@@ -1,0 +1,40 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Release: {{ .Release.Name }}
+Namespace: {{ include "backrest-operator.namespace" . }}
+Chart version: {{ .Chart.Version }}
+App version: {{ .Chart.AppVersion }}
+
+The Backrest operator has been deployed.
+
+  Operator: {{ include "backrest-operator.fullname" . }}
+  Default Backrest image: {{ include "backrest-operator.backrestImage" . }}
+{{- if .Values.mcp.enabled }}
+
+MCP server:
+  Service: {{ printf "%s-mcp" (include "backrest-operator.fullname" .) }}:{{ .Values.mcp.service.port }}
+  Authenticate with a Kubernetes bearer token; bind ClusterRoles backrest-viewer, backrest-operator, or backrest-admin to your user or group.
+{{- end }}
+{{- if .Values.operator.webhook.enabled }}
+
+Validating webhooks are enabled.
+{{- if .Values.operator.webhook.certManager.enabled }}
+  TLS: cert-manager Certificate {{ include "backrest-operator.webhookCertSecretName" . }}
+{{- else }}
+  Ensure webhook TLS certificates are available in secret {{ include "backrest-operator.webhookCertSecretName" . }}.
+{{- end }}
+{{- end }}
+
+Before creating custom resources, apply CRDs from the chart crds/ directory:
+
+  kubectl apply -f crds/
+
+Get operator status:
+
+  kubectl get pods -n {{ include "backrest-operator.namespace" . }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Metrics endpoint:
+
+  kubectl port-forward -n {{ include "backrest-operator.namespace" . }} svc/{{ include "backrest-operator.fullname" . }} {{ .Values.operator.metrics.port }}:{{ .Values.operator.metrics.port }}
+
+For documentation see: https://github.com/example/backrest-operator

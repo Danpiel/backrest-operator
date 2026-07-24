@@ -1,0 +1,23 @@
+apiVersion: v2
+name: backrest-operator
+description: Kubernetes operator for Backrest backup management with MCP integration
+type: application
+version: 0.1.0
+appVersion: "1.14.1"
+home: https://github.com/example/backrest-operator
+sources:
+  - https://github.com/garethgeorge/backrest
+  - https://github.com/example/backrest-operator
+keywords:
+  - backup
+  - restic
+  - backrest
+  - operator
+  - kubernetes
+  - csi
+maintainers:
+  - name: Backrest Operator Maintainers
+    email: maintainers@example.com
+annotations:
+  backrest.upstream.image: ghcr.io/garethgeorge/backrest
+  backrest.upstream.tag: v1.14.1

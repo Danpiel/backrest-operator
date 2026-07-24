@@ -1,0 +1,24 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackupPlan
+metadata:
+  name: app-data-daily
+  namespace: app
+spec:
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  clusterRef:
+    name: main
+    namespace: backrest-system
+  schedule: "0 2 * * *"
+  paths:
+    - /var/lib/myapp
+  excludes:
+    - /var/lib/myapp/tmp
+  retention:
+    keepLast: 7
+    keepDaily: 14
+    keepWeekly: 8
+  tags:
+    - daily
+    - app

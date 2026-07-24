@@ -1,0 +1,42 @@
+# Bind a human user or group to the backrest-operator ClusterRole.
+# Replace subject name/kind for your identity provider.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backrest-operator-alice
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backrest-operator
+subjects:
+  - kind: User
+    name: alice@example.com
+    apiGroup: rbac.authorization.k8s.io
+---
+# Read-only access example
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backrest-viewer-auditors
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backrest-viewer
+subjects:
+  - kind: Group
+    name: backup-auditors
+    apiGroup: rbac.authorization.k8s.io
+---
+# Admin access (delete, secrets, destructive MCP tools)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backrest-admin-platform
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backrest-admin
+subjects:
+  - kind: Group
+    name: platform-admins
+    apiGroup: rbac.authorization.k8s.io

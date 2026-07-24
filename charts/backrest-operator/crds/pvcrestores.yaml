@@ -1,0 +1,192 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: pvcrestores.operator.backrest.io
+  labels:
+    app.kubernetes.io/name: backrest-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: operator.backrest.io
+  scope: Namespaced
+  names:
+    plural: pvcrestores
+    singular: pvcrestore
+    kind: PVCRestore
+    shortNames:
+      - pvcr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - mode
+              properties:
+                mode:
+                  type: string
+                  enum:
+                    - fromVolumeSnapshot
+                    - fromResticToNewPVC
+                    - fromResticToExistingPVC
+                    - export
+                repositoryRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                    - name
+                restic:
+                  type: object
+                  properties:
+                    snapshotID:
+                      type: string
+                      default: latest
+                    pathFilters:
+                      type: array
+                      description: Partial restore paths. Empty means full restore.
+                      items:
+                        type: string
+                volumeSnapshotRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                target:
+                  type: object
+                  properties:
+                    existingPVCName:
+                      type: string
+                      description: Target PVC when mode is fromResticToExistingPVC.
+                    newPVC:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        size:
+                          type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        storageClassName:
+                          type: string
+                        accessModes:
+                          type: array
+                          items:
+                            type: string
+                            enum:
+                              - ReadWriteOnce
+                              - ReadOnlyMany
+                              - ReadWriteMany
+                              - ReadWriteOncePod
+                quiesce:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    timeoutSeconds:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 900
+                    targets:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          apiVersion:
+                            type: string
+                          kind:
+                            type: string
+                          name:
+                            type: string
+                          action:
+                            type: string
+                            enum:
+                              - scaleToZero
+                              - deletePods
+                        required:
+                          - kind
+                          - name
+                export:
+                  type: object
+                  description: Export settings when mode is export.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    ttlSeconds:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 3600
+                    oneShot:
+                      type: boolean
+                      description: Invalidate URL after first successful download.
+                      default: true
+                    format:
+                      type: string
+                      enum:
+                        - tar
+                        - restic-dump
+                      default: tar
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Quiescing
+                    - Restoring
+                    - Exporting
+                    - Succeeded
+                    - Failed
+                exportURL:
+                  type: string
+                  description: In-cluster URL for curl download (ClusterIP + token path).
+                exportExpiresAt:
+                  type: string
+                  format: date-time
+                lastJobName:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Export URL
+          type: string
+          jsonPath: .status.exportURL
+          priority: 1
+        - name: Job
+          type: string
+          jsonPath: .status.lastJobName
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

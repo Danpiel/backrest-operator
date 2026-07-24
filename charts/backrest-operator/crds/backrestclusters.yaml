@@ -1,0 +1,208 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backrestclusters.operator.backrest.io
+  labels:
+    app.kubernetes.io/name: backrest-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: operator.backrest.io
+  scope: Namespaced
+  names:
+    plural: backrestclusters
+    singular: backrestcluster
+    kind: BackrestCluster
+    shortNames:
+      - brc
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                version:
+                  type: string
+                  description: >-
+                    Backrest version tag. Empty uses the chart default (latest
+                    stable pin at release time).
+                image:
+                  type: string
+                  description: Backrest container image repository.
+                  default: ghcr.io/garethgeorge/backrest
+                host:
+                  type: object
+                  properties:
+                    replicas:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                      default: 1
+                    serviceType:
+                      type: string
+                      description: Kubernetes Service type for the Backrest host.
+                      default: ClusterIP
+                    enableServiceLinks:
+                      type: boolean
+                      description: >-
+                        When false, avoids Kubernetes service env injection
+                        clashing with BACKREST_PORT.
+                      default: false
+                    ingress:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: false
+                        className:
+                          type: string
+                        host:
+                          type: string
+                        tls:
+                          type: array
+                          items:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                    persistence:
+                      type: object
+                      properties:
+                        size:
+                          type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          default: 20Gi
+                        storageClassName:
+                          type: string
+                    resources:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                agents:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    mode:
+                      type: string
+                      enum:
+                        - DaemonSet
+                        - Deployment
+                      default: DaemonSet
+                    replicas:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                      description: Replica count when mode is Deployment.
+                      default: 1
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    multihost:
+                      type: object
+                      properties:
+                        serverURL:
+                          type: string
+                          description: >-
+                            Backrest host URL for agents. Empty defaults to
+                            http://<host-svc>.<ns>.svc:9898.
+                        permissions:
+                          type: array
+                          items:
+                            type: string
+                auth:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    existingSecret:
+                      type: string
+                      description: >-
+                        Existing Secret containing Backrest auth credentials.
+                        Key names depend on Backrest auth support.
+                monitoring:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                mcp:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Deploy companion MCP server from the chart.
+                      default: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Ready
+                    - Degraded
+                    - Failed
+                hostReady:
+                  type: boolean
+                agentsReady:
+                  type: integer
+                  format: int32
+                agentsDesired:
+                  type: integer
+                  format: int32
+                multihostPaired:
+                  type: integer
+                  format: int32
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Host Ready
+          type: boolean
+          jsonPath: .status.hostReady
+        - name: Agents Ready
+          type: integer
+          jsonPath: .status.agentsReady
+        - name: Agents Desired
+          type: integer
+          jsonPath: .status.agentsDesired
+        - name: Paired
+          type: integer
+          jsonPath: .status.multihostPaired
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

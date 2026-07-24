@@ -1,0 +1,220 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: pvcbackups.operator.backrest.io
+  labels:
+    app.kubernetes.io/name: backrest-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: operator.backrest.io
+  scope: Namespaced
+  names:
+    plural: pvcbackups
+    singular: pvcbackup
+    kind: PVCBackup
+    shortNames:
+      - pvcbk
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - pvcName
+                - repositoryRef
+              properties:
+                pvcName:
+                  type: string
+                  description: Name of the PersistentVolumeClaim to back up.
+                repositoryRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                strategy:
+                  type: object
+                  properties:
+                    pipeline:
+                      type: array
+                      description: >-
+                        Ordered backup steps. Each step may be skipped if empty
+                        or not applicable.
+                      items:
+                        type: string
+                        enum:
+                          - liveFlush
+                          - csiSnapshot
+                          - topolvmSnapshot
+                          - quiescedLive
+                volumeSnapshotClassName:
+                  type: string
+                  description: Required when pipeline includes snapshot steps.
+                flush:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    mode:
+                      type: string
+                      enum:
+                        - exec
+                        - script
+                      default: exec
+                    targetPod:
+                      type: object
+                      properties:
+                        labelSelector:
+                          type: object
+                          additionalProperties:
+                            type: string
+                        container:
+                          type: string
+                        command:
+                          type: array
+                          items:
+                            type: string
+                    script:
+                      type: string
+                      description: Inline script or ConfigMap reference when mode is script.
+                quiesce:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    timeoutSeconds:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      default: 900
+                    leaveDown:
+                      type: boolean
+                      description: >-
+                        When true, workloads remain quiesced after backup.
+                        Defaults to false; operator always unquiesces in finally
+                        unless true.
+                      default: false
+                    targets:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          apiVersion:
+                            type: string
+                          kind:
+                            type: string
+                          name:
+                            type: string
+                          action:
+                            type: string
+                            enum:
+                              - scaleToZero
+                              - deletePods
+                        required:
+                          - kind
+                          - name
+                paths:
+                  type: array
+                  items:
+                    type: string
+                  default:
+                    - /
+                excludes:
+                  type: array
+                  items:
+                    type: string
+                schedule:
+                  type: string
+                  description: >-
+                    Cron schedule for recurring backups. Empty means one-shot.
+                retention:
+                  type: object
+                  properties:
+                    keepLast:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                    deleteVolumeSnapshotAfterUpload:
+                      type: boolean
+                      default: true
+                backoffLimit:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  default: 2
+                ttlSecondsAfterFinished:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  default: 86400
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Flushing
+                    - Quiescing
+                    - Snapshotting
+                    - Uploading
+                    - Unquiescing
+                    - Succeeded
+                    - Failed
+                lastBackupTime:
+                  type: string
+                  format: date-time
+                lastSnapshotName:
+                  type: string
+                lastResticSnapshotID:
+                  type: string
+                lastJobName:
+                  type: string
+                lastDurationSeconds:
+                  type: integer
+                  format: int32
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PVC
+          type: string
+          jsonPath: .spec.pvcName
+        - name: Last Backup
+          type: date
+          jsonPath: .status.lastBackupTime
+        - name: Snapshot
+          type: string
+          jsonPath: .status.lastSnapshotName
+        - name: Restic ID
+          type: string
+          jsonPath: .status.lastResticSnapshotID
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

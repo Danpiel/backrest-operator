@@ -1,0 +1,39 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackrestCluster
+metadata:
+  name: main
+  namespace: backrest-system
+spec:
+  version: v1.14.1
+  image: ghcr.io/garethgeorge/backrest
+  host:
+    replicas: 1
+    serviceType: ClusterIP
+    enableServiceLinks: false
+    ingress:
+      enabled: false
+      className: nginx
+      host: backrest.example.com
+    persistence:
+      size: 20Gi
+      storageClassName: standard
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+  agents:
+    enabled: true
+    mode: DaemonSet
+    multihost:
+      serverURL: ""
+      permissions:
+        - ReadOperations
+        - ReceiveSharedRepos
+  auth:
+    enabled: false
+  monitoring:
+    enabled: true
+  mcp:
+    enabled: true

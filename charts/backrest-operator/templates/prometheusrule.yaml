@@ -1,0 +1,66 @@
+{{- if .Values.monitoring.prometheusRules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "backrest-operator.fullname" . }}
+  namespace: {{ include "backrest-operator.namespace" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRules.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: backrest-operator.rules
+      rules:
+        - alert: BackrestBackupFailed
+          expr: increase(backrest_backup_failed_total[15m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Backrest backup failed
+            description: A Backrest backup plan or PVC backup has failed recently.
+        - alert: BackrestBackupNotSucceedingWithinSLA
+          expr: (time() - backrest_backup_last_success_timestamp_seconds) > {{ .Values.monitoring.backupSlaSeconds }}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Backrest backup not succeeding within SLA
+            description: No successful backup within {{ .Values.monitoring.backupSlaWindow }}.
+        - alert: BackrestRepositoryStorageWarning
+          expr: backrest_repository_storage_usage_ratio > {{ .Values.monitoring.storageUsageWarningRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Backrest repository storage usage warning
+            description: Repository storage usage exceeds the warning threshold ({{ .Values.monitoring.storageUsageWarningRatio }}).
+        - alert: BackrestRepositoryStorageCritical
+          expr: backrest_repository_storage_usage_ratio > {{ .Values.monitoring.storageUsageCriticalRatio }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Backrest repository storage usage critical
+            description: Repository storage usage exceeds the critical threshold ({{ .Values.monitoring.storageUsageCriticalRatio }}).
+        - alert: BackrestOperatorTargetDown
+          expr: up{service="{{ include "backrest-operator.fullname" . }}"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Backrest operator metrics target down
+            description: Prometheus cannot scrape the Backrest operator metrics endpoint.
+        {{- if .Values.mcp.enabled }}
+        - alert: BackrestMcpTargetDown
+          expr: up{service="{{ printf "%s-mcp" (include "backrest-operator.fullname" .) }}"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Backrest MCP metrics target down
+            description: Prometheus cannot scrape the Backrest MCP metrics endpoint.
+        {{- end }}
+{{- end }}

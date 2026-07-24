@@ -1,0 +1,709 @@
+# Backrest Operator — Specification
+
+**Project:** Backrest Operator  
+**API group:** `operator.backrest.io`  
+**API version:** `v1alpha1`  
+**License:** Apache-2.0  
+**Language:** English (code, docs, comments, examples)  
+**Upstream backup manager:** [garethgeorge/backrest](https://github.com/garethgeorge/backrest) (Web UI + orchestrator for [restic](https://restic.net/))  
+**Stack:** Python 3.12 monorepo — [Kopf](https://kopf.readthedocs.io/) operator + separate MCP server process  
+**Backrest image:** pin to the **latest stable** upstream release at each chart/operator release  
+
+This document is the single source of truth for implementing and evolving the project. Do not embed organization-specific infrastructure names, hostnames, buckets, or credentials in the repository.
+
+---
+
+## 1. Goals
+
+| ID | Goal | Outcome |
+|----|------|---------|
+| G1 | Kubernetes-native backup operator | CRDs drive Backrest + restic + CSI snapshots with a single cluster-scoped operator and watch filters |
+| G2 | Agent-operable MCP | Separate MCP Deployment lets AI agents create/delete/trigger plans and manage backups under Kubernetes RBAC |
+| G3 | Flexible backup modes | Live flush, quiesced file copy, CSI/TopoLVM snapshots, and ordered combinations |
+| G4 | Backrest feature parity | Cron, on-demand, retention/forget, prune, hooks/bash scripts — everything Backrest already does |
+| G5 | Restore paths | Existing PVC, new PVC, partial paths, local download via MCP+Job, curl via self-hosted restore-proxy Job |
+| G6 | Observability | Prometheus + VictoriaMetrics scrapes, embedded alert rules, Grafana dashboard |
+| G7 | Opensource-ready | Generic Helm charts, docs, Docker build, unit tests; no private infra coupling |
+| G8 | Operator DR | Backup of operator/Backrest state + manual runbooks when the operator is unavailable |
+
+### Non-goals (v1)
+
+- Cross-cluster disaster-recovery orchestration
+- Replacing the Backrest Web UI for day-2 browsing
+- Kind/k3d e2e in CI (deferred; unit tests + image/chart CI only)
+- Vendoring Backrest GPL sources into the operator image (call upstream binary/API only)
+- Organization-specific examples (internal domains, buckets, node labels)
+
+---
+
+## 2. Architecture
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │              AI / human clients             │
+                    │   Cursor agents · curl · kubectl · UI       │
+                    └───────────────┬─────────────┬───────────────┘
+                                    │             │
+                    Bearer kube token│             │ Ingress (opt auth)
+                                    ▼             ▼
+                         ┌────────────────┐  ┌──────────────┐
+                         │  backrest-mcp  │  │ Backrest UI  │
+                         │  Deployment    │  │ host :9898   │
+                         │  HTTP/SSE+stdio│  └──────┬───────┘
+                         └───────┬────────┘         │ multihost
+                                 │ TokenReview      ▼
+                                 │ SAR+Impersonate ┌──────────────┐
+                                 ▼                 │ agents (DS)  │
+                         ┌────────────────┐        └──────────────┘
+                         │ Kubernetes API │
+                         │ + Validating   │
+                         │   Webhooks     │
+                         └───────┬────────┘
+                                 │ CRs (operator.backrest.io)
+                                 ▼
+                         ┌────────────────┐
+                         │ backrest-      │  watch filters
+                         │ operator       │  (ns / labels)
+                         └───────┬────────┘
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                  ▼
+     VolumeSnapshot      restic Jobs         restore-proxy Job
+     + quiesce/flush     → any restic        (TTL HTTP / curl)
+                         backend
+```
+
+### Components
+
+| Component | Role |
+|-----------|------|
+| **backrest-operator** | Reconciles CRs; deploys Backrest host + agents; runs snapshot/quiesce/restic/export Jobs; serves `/metrics`; registers validating webhooks |
+| **backrest-mcp** | Separate Deployment (process isolation). MCP tools over Streamable HTTP/SSE and stdio. Does not share the operator process |
+| **Backrest host + agents** | Upstream Backrest in server–agent (multihost) mode; Web UI via Service/Ingress; optional UI auth |
+| **restore-proxy Job** | Self-contained short-lived HTTP server streaming a restic dump/archive — no S3 pre-signed URLs or external CDN |
+
+### Watch model
+
+- One **cluster-scoped** operator Deployment.
+- Configurable **filters**: namespace allow/deny lists and/or label selectors on watched CRs and related workloads.
+- Default: watch all namespaces (empty allow-list = all).
+
+---
+
+## 3. Custom Resources (`operator.backrest.io/v1alpha1`)
+
+### 3.1 `BackrestCluster`
+
+Deploys and wires Backrest host + agents.
+
+```yaml
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackrestCluster
+metadata:
+  name: main
+  namespace: backrest-system
+spec:
+  version: ""                          # empty = chart default = latest stable pin
+  image: ghcr.io/garethgeorge/backrest
+  host:
+    replicas: 1
+    serviceType: ClusterIP
+    enableServiceLinks: false          # avoid K8s BACKREST_PORT injection clash
+    ingress:
+      enabled: false
+      className: ""
+      host: backrest.example.com
+      tls: []
+    persistence:
+      size: 20Gi
+      storageClassName: ""
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+  agents:
+    enabled: true
+    mode: DaemonSet                    # DaemonSet | Deployment
+    replicas: 1                        # Deployment only
+    nodeSelector: {}
+    tolerations: []
+    multihost:
+      serverURL: ""                    # default http://<host-svc>.<ns>.svc:9898
+      permissions:
+        - ReadOperations
+        - ReceiveSharedRepos
+  auth:
+    enabled: false
+    existingSecret: ""                 # keys depend on Backrest auth support
+  monitoring:
+    enabled: true
+  mcp:
+    enabled: true                      # deploy companion MCP from same chart or subchart
+status:
+  phase: Pending                       # Pending | Ready | Degraded | Failed
+  hostReady: false
+  agentsReady: 0
+  agentsDesired: 0
+  multihostPaired: 0
+  conditions: []
+```
+
+### 3.2 `BackupRepository`
+
+Any restic/Backrest-supported backend.
+
+```yaml
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackupRepository
+metadata:
+  name: primary
+  namespace: backrest-system
+spec:
+  # Full restic repository URL (s3:, b2:, azure:, gs:, sftp:, rclone:, local path, etc.)
+  url: "s3:https://s3.example.com/my-bucket/backups"
+  passwordSecretRef:
+    name: backup-repo
+    key: RESTIC_PASSWORD
+  # Optional backend env (AWS_*, B2_*, AZURE_*, rclone config, etc.)
+  envFromSecretRef:
+    name: backup-repo-env
+  appendOnly: false                    # when true: restic append-only policy / flags
+  verify:
+    enabled: true                      # default ON; set false to disable
+    schedule: "0 3 * * 0"              # restic check cadence
+  shared: true                         # mark shared in Backrest multihost when applicable
+  backrest:
+    syncToHost: true
+    clusterRef:
+      name: main
+      namespace: backrest-system
+status:
+  phase: Pending
+  resticURL: ""
+  lastCheckTime: ""
+  lastCheckResult: ""
+  conditions: []
+```
+
+**Secrets:** Kubernetes `Secret` is required for passwords/keys. Optional integrations (documented examples, not hard dependencies): External Secrets Operator, HashiCorp Vault Agent/CSI.
+
+### 3.3 `BackupPlan`
+
+Schedules and retention with Backrest parity (cron, hooks, forget policy).
+
+```yaml
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackupPlan
+metadata:
+  name: app-data-daily
+  namespace: app
+spec:
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  clusterRef:
+    name: main
+    namespace: backrest-system
+  schedule: "0 2 * * *"                # empty = manual / on-demand only
+  paths: ["/data"]
+  excludes: ["**/lost+found"]
+  retention:
+    keepLast: 7
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+    keepYearly: 0
+  hooks:                               # Backrest/bash hooks
+    - condition: CONDITION_SNAPSHOT_START
+      action: shell
+      command: |
+        #!/bin/bash
+        set -euo pipefail
+        echo "pre-backup"
+  tags:
+    - k8s
+  # Optional link to PVC-centric orchestration
+  pvcBackupRef:
+    name: ""
+    namespace: ""
+status:
+  phase: Pending
+  lastBackupTime: ""
+  lastSnapshotID: ""
+  conditions: []
+```
+
+### 3.4 `PVCBackup`
+
+PVC-centric backup with strategy pipeline.
+
+```yaml
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCBackup
+metadata:
+  name: app-pvc
+  namespace: app
+spec:
+  pvcName: app-data
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  # Ordered pipeline; each step may be skipped if empty
+  strategy:
+    pipeline:
+      - liveFlush                      # optional flush while app runs
+      - csiSnapshot                    # or topolvmSnapshot
+      # - quiescedLive                 # alternative/combo: stop pods then file copy
+  volumeSnapshotClassName: ""          # required for snapshot steps
+  flush:
+    enabled: false
+    # Exec into a pod OR run a Job script before snapshot/copy
+    mode: exec                         # exec | script
+    targetPod:
+      labelSelector:
+        app: database
+      container: db
+      command: ["bash", "-c", "FLUSH TABLES WITH READ LOCK; sleep 2"]
+    script: ""                         # used when mode=script (ConfigMap/inline)
+  quiesce:
+    enabled: false
+    timeoutSeconds: 900
+    leaveDown: false                   # MUST default false; always unquiesce in finally unless true
+    targets:
+      - apiVersion: apps/v1
+        kind: StatefulSet
+        name: app
+        # action: scaleToZero | deletePods
+  paths: ["/"]
+  excludes: []
+  schedule: ""                         # CronJob when set; else one-shot
+  retention:
+    keepLast: 6
+    deleteVolumeSnapshotAfterUpload: true
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+status:
+  phase: Pending
+  # Pending|Flushing|Quiescing|Snapshotting|Uploading|Unquiescing|Succeeded|Failed
+  lastBackupTime: ""
+  lastSnapshotName: ""
+  lastResticSnapshotID: ""
+  lastJobName: ""
+  lastDurationSeconds: 0
+  conditions: []
+```
+
+#### Strategy semantics
+
+| Step | Behavior |
+|------|----------|
+| `liveFlush` | Run flush command/script; application keeps running |
+| `csiSnapshot` | Create generic CSI `VolumeSnapshot` → clone/mount RO → restic backup |
+| `topolvmSnapshot` | Same as CSI with TopoLVM thin snapshot class; pin Jobs to source node when required |
+| `quiescedLive` | Scale/stop dependent pods → mount source PVC → restic → unquiesce |
+
+Combinations are expressed as an ordered `pipeline` (e.g. `liveFlush` → `csiSnapshot`, or `quiescedLive` alone).
+
+### 3.5 `PVCRestore`
+
+```yaml
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCRestore
+metadata:
+  name: app-restore
+  namespace: app
+spec:
+  mode: fromResticToExistingPVC
+  # fromVolumeSnapshot | fromResticToNewPVC | fromResticToExistingPVC | export
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  restic:
+    snapshotID: latest
+    pathFilters: []                    # partial restore; empty = full
+  volumeSnapshotRef:
+    name: ""
+    namespace: ""
+  target:
+    existingPVCName: app-data          # for existing PVC mode
+    newPVC:
+      name: app-data-restored
+      size: 100Gi
+      storageClassName: ""
+      accessModes: ["ReadWriteOnce"]
+  quiesce:
+    enabled: true
+    timeoutSeconds: 900
+    targets: []
+  export:                              # mode=export
+    enabled: false
+    ttlSeconds: 3600
+    oneShot: true                      # invalidate URL after first successful download
+    format: tar                        # tar | restic-dump stream
+status:
+  phase: Pending
+  exportURL: ""                        # in-cluster URL for curl (ClusterIP + token path)
+  exportExpiresAt: ""
+  lastJobName: ""
+  conditions: []
+```
+
+---
+
+## 4. Backup algorithms
+
+### 4.1 CSI / TopoLVM snapshot → restic
+
+1. Optional `liveFlush`.
+2. Optional quiesce (if requested in pipeline).
+3. Create `VolumeSnapshot` with configured `VolumeSnapshotClass`.
+4. Wait until `ReadyToUse`.
+5. Create temporary PVC from snapshot (`dataSource`) — RO mount in Job.
+6. For TopoLVM: schedule Job on the snapshot source node when the driver requires it.
+7. Run `restic backup` into `BackupRepository` URL with password/env from Secrets.
+8. Apply retention (Backrest forget and/or operator cleanup of VolumeSnapshots).
+9. Always unquiesce in `finally` unless `leaveDown: true`.
+10. Update status + metrics.
+
+### 4.2 Quiesced live file copy
+
+1. Scale/stop targets holding the PVC.
+2. Mount source PVC in Job (RWO: app must be down).
+3. `restic backup` → unquiesce → status/metrics.
+
+### 4.3 Scheduling and retention
+
+- Prefer **Backrest** for plan cron, forget, prune, hooks, and bash scripts when the workload is a Backrest plan.
+- Prefer **operator CronJob / PVCBackup.schedule** when orchestration needs K8s snapshot/quiesce steps Backrest cannot perform alone.
+- `BackupRepository.spec.verify.enabled` defaults to `true` (scheduled `restic check`); set `false` to disable.
+
+### 4.4 Append-only
+
+When `BackupRepository.spec.appendOnly: true`, the operator/Backrest configure the repository for append-only restic usage (deny forget/prune/delete that would rewrite history, per restic append-only semantics). Destructive MCP tools that would violate append-only must fail closed unless an admin overrides with explicit flags **and** RBAC admin role.
+
+---
+
+## 5. Restore algorithms
+
+### 5.1 Existing PVC
+
+1. Optional quiesce of workloads using the PVC.
+2. Job mounts PVC; `restic restore` with optional `pathFilters`.
+3. Unquiesce; update status.
+
+### 5.2 New PVC
+
+- From VolumeSnapshot: PVC with `dataSource` = snapshot.
+- From restic: create empty PVC → Job mounts → `restic restore`.
+
+### 5.3 Local machine (MCP + Job)
+
+1. MCP tool `restore_export` (requires operator-level RBAC) creates a `PVCRestore` with `mode: export` or a dedicated export Job.
+2. Job runs `restic dump` / tar archive of selected paths.
+3. Client downloads via:
+   - MCP streaming tool response, and/or
+   - instructions to fetch the Job’s export endpoint (port-forward or in-cluster URL).
+
+### 5.4 curl link (self-contained restore-proxy)
+
+Design priority: **stable and independent of external components** (no object-store pre-signed URLs, no CDN).
+
+1. Operator creates a short-lived Job+Service that:
+   - authenticates with a high-entropy token in the URL path or query;
+   - streams the archive over HTTP;
+   - enforces TTL and optional one-shot download;
+   - exits and deletes itself after expiry.
+2. Status publishes an in-cluster URL, e.g. `http://restore-<name>.<ns>.svc/<token>/archive.tar`.
+3. Users run `kubectl port-forward` or expose via optional Ingress (documented; default ClusterIP only).
+4. Example: `curl -fL -o backup.tar "http://127.0.0.1:8080/<token>/archive.tar"`.
+
+---
+
+## 6. MCP server
+
+### 6.1 Deployment
+
+- Separate Deployment `backrest-mcp`, Service, optional Ingress.
+- Own ServiceAccount, resource limits, and scrape config.
+- Must not run inside the operator process.
+
+### 6.2 Transports
+
+- **Streamable HTTP / SSE** for remote/in-cluster agents.
+- **stdio** for local IDE/CLI (inherits caller kubeconfig).
+
+### 6.3 Authentication and authorization (Kubernetes-native)
+
+Per-user identity — do **not** execute tools solely as the MCP pod SA.
+
+**HTTP/SSE flow:**
+
+1. Client sends `Authorization: Bearer <token>` (user OIDC/exec plugin token, or `kubectl create token`).
+2. MCP validates with **TokenReview** (MCP SA: `create` on `tokenreviews.authentication.k8s.io`).
+3. Each tool maps to Kubernetes resource attributes on CRs (and related objects).
+4. **SubjectAccessReview** filters `list_tools` and gates `call_tool`.
+5. API calls use **user impersonation** (`Impersonate-User` / groups) so ClusterRoles are the source of truth.
+
+**stdio:** use the caller’s kubeconfig; apply the same SAR rules where feasible.
+
+**MCP pod SA permissions (minimal):** TokenReview, SubjectAccessReview, Impersonate users/groups — **not** blanket CR admin.
+
+### 6.4 RBAC roles (shipped)
+
+| ClusterRole | Capabilities |
+|-------------|--------------|
+| `backrest-viewer` | get/list/watch CRs; read backup metadata/status |
+| `backrest-operator` | create/update plans & backups; trigger backups; restores/exports |
+| `backrest-admin` | delete; destructive flags; repository secret refs; append-only overrides |
+
+### 6.5 Destructive operations
+
+Tools that delete plans, snapshots, repositories, or force wipe require:
+
+```text
+allow_destructive: true
+```
+
+Default is `false`. Webhooks and MCP both enforce this.
+
+### 6.6 Tool catalog (v1)
+
+| Tool | Verb mapping | Notes |
+|------|--------------|-------|
+| `list_clusters` / `get_cluster` | get/list BackrestCluster | |
+| `list_repositories` / `get_repository` | get/list BackupRepository | |
+| `create_repository` / `update_repository` | create/update | |
+| `delete_repository` | delete | requires `allow_destructive` |
+| `list_plans` / `get_plan` | get/list BackupPlan | |
+| `create_plan` / `update_plan` | create/update | |
+| `delete_plan` | delete | requires `allow_destructive` |
+| `trigger_backup` | create Job / annotate plan | on-demand backup |
+| `list_snapshots` / `get_snapshot` | get via status/Backrest/restic | |
+| `delete_snapshot` | forget/delete | requires `allow_destructive`; blocked if appendOnly |
+| `create_pvc_backup` / `get_pvc_backup` | PVCBackup CRUD | |
+| `create_pvc_restore` / `get_pvc_restore` | PVCRestore CRUD | pathFilters supported |
+| `restore_export` | create export restore | returns curl URL +/or streams via MCP |
+| `repo_status` | get + metrics summary | storage usage when available |
+
+---
+
+## 7. Validating webhooks
+
+Admission webhooks validate CRs and provide guardrails for AI/MCP-generated objects.
+
+**Must reject or require extra flags for:**
+
+- Missing `repositoryRef` / invalid restic URL scheme
+- Snapshot strategy without `volumeSnapshotClassName`
+- Quiesce `leaveDown: true` without admin annotation/flag
+- Destructive deletes without `allow_destructive` equivalent annotation on the CR (when created via MCP)
+- Append-only repo with prune/forget policies that contradict append-only
+- Cross-namespace refs outside operator watch filters (when filters enabled)
+- Export TTL outside allowed bounds
+
+Webhook TLS: cert-manager (preferred) or operator-managed certificates.
+
+---
+
+## 8. Backrest host mode
+
+- Run Backrest in **server–agent (multihost)** mode: one host Deployment + agent DaemonSet (or Deployment).
+- Web UI exposed via Service; optional Ingress.
+- Optional authentication for the UI (Backrest-supported auth via Secret).
+- Set `enableServiceLinks: false` (or explicitly set `BACKREST_PORT`) to avoid Kubernetes service env clashing with Backrest’s `BACKREST_PORT`.
+- Default image tag: latest stable upstream at release time.
+
+---
+
+## 9. Monitoring and alerting
+
+### 9.1 Metrics (Prometheus text)
+
+Expose at least:
+
+- Backup success/failure counts and last status (per plan/PVC)
+- Backup duration histograms/summaries
+- Snapshot/copy counts retained
+- Repository storage usage and fill ratio (when backend/API allows; otherwise restic stats best-effort)
+- Operator reconcile errors; MCP auth denials
+
+### 9.2 Helm embeds (all toggleable)
+
+| Resource | Default |
+|----------|---------|
+| `ServiceMonitor` | on when `monitoring.serviceMonitor.enabled` |
+| `VMServiceScrape` | on when `monitoring.vmServiceScrape.enabled` |
+| `PrometheusRule` | on when `monitoring.prometheusRules.enabled` |
+| `VMRule` | on when `monitoring.vmRules.enabled` |
+| Grafana dashboard ConfigMap | on when `monitoring.grafanaDashboard.enabled` |
+
+### 9.3 Alert examples (embedded)
+
+- Backup failed / stuck in Failed
+- Backup not succeeding within SLA window
+- Repository storage above warning threshold (configurable, e.g. 80%)
+- Repository storage above critical threshold (e.g. 95%)
+- Operator / MCP / Backrest target down
+
+No organization-specific alert names or receivers in the chart defaults.
+
+---
+
+## 10. Helm chart surface
+
+Chart name: `backrest-operator`.
+
+Suggested values (non-exhaustive):
+
+```yaml
+operator:
+  image:
+    repository: ghcr.io/<github-user>/backrest-operator
+    tag: ""
+  watch:
+    namespaces: []                     # empty = all
+    labelSelector: ""
+  resources: {}
+  webhook:
+    enabled: true
+    certManager:
+      enabled: true
+
+mcp:
+  enabled: true
+  image:
+    repository: ghcr.io/<github-user>/backrest-mcp
+    tag: ""
+  service:
+    type: ClusterIP
+    port: 8081
+  ingress:
+    enabled: false
+  resources: {}
+
+backrest:
+  image:
+    repository: ghcr.io/garethgeorge/backrest
+    tag: ""                            # latest stable pin in Chart.yaml appVersion/annotations
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+  vmServiceScrape:
+    enabled: true
+  prometheusRules:
+    enabled: true
+  vmRules:
+    enabled: true
+  grafanaDashboard:
+    enabled: true
+  storageUsageWarningRatio: 0.8
+  storageUsageCriticalRatio: 0.95
+```
+
+**Consumer infra layout (after GitHub publish only):** a separate folder in the consumer’s infra repo with environment `values` and `apply.sh` — not shipped inside this opensource tree with private data.
+
+---
+
+## 11. Security model
+
+- ClusterRoles: `backrest-viewer`, `backrest-operator`, `backrest-admin`.
+- Operator SA: manage owned CRs, Jobs, VolumeSnapshots, Deployments/DaemonSets for Backrest, Secrets it creates — least privilege.
+- MCP SA: authz APIs + impersonation only.
+- Repository credentials always in Secrets; document ExternalSecrets/Vault as optional.
+- Append-only repos fail closed on delete/forget.
+- Export URLs: random tokens, TTL, optional one-shot; ClusterIP by default.
+
+---
+
+## 12. Documentation requirements
+
+Docs must include:
+
+1. **Operator usage** — install Helm, create repository/plan/PVC backup/restore.
+2. **MCP usage** — HTTP and stdio setup, kube token auth, role bindings, destructive flag.
+3. **Manual backup runbook** — raw `restic` + `VolumeSnapshot` without the operator.
+4. **Manual restore runbook** — restore to PVC and local tarball without the operator.
+5. **Operator/Backrest state backup** — how to back up host PVC/config/pairing secrets.
+6. **DR** — recover control plane pieces after operator loss.
+
+All documentation in English.
+
+---
+
+## 13. Build, test, release
+
+| Item | v1 requirement |
+|------|----------------|
+| Docker images | `backrest-operator`, `backrest-mcp` (multi-stage, non-root) |
+| Helm chart | packaged in CI; CRDs in `crds/` |
+| Unit tests | handlers, webhooks validators, MCP auth/SAR mapping, strategy pipeline |
+| Kind/k3d e2e | **out of scope for v1** |
+| CI | lint, unit tests, build images, package chart |
+
+---
+
+## 14. Operator self-backup and DR
+
+- Support (CR or documented Job) to back up Backrest host persistence and operator-managed Secrets/ConfigMaps needed to rehydrate a cluster.
+- Docs must describe restoring that state onto a fresh operator install.
+- Manual restic/CSI procedures remain first-class for total operator failure.
+
+---
+
+## 15. Phased delivery
+
+| Phase | Scope |
+|-------|--------|
+| **P0** | CRDs, operator reconcile for BackrestCluster / BackupRepository / BackupPlan / PVCBackup / PVCRestore (existing+new PVC), CSI+TopoLVM+quiesce+flush pipeline, Helm skeleton, metrics endpoint, unit tests |
+| **P1** | MCP Deployment, TokenReview+impersonation+SAR, RBAC roles, destructive flag, validating webhooks |
+| **P2** | restore-proxy Job + curl/MCP download, embedded ServiceMonitor/VMServiceScrape/PrometheusRule/VMRule, Grafana dashboard, append-only + verify defaults |
+| **P3** | Full docs (incl. manual DR), operator state backup helpers, chart polish, latest-stable Backrest pin automation |
+
+---
+
+## 16. Backrest fork policy
+
+Prefer upstream images and APIs.
+
+Clone/fork Backrest only when implementation hits a hard gap (examples: non-UI multihost pairing automation, missing metrics, API needed by MCP). Record gaps below; upstream PRs are encouraged.
+
+### Gap log
+
+| Date | Gap | Workaround | Fork needed? |
+|------|-----|------------|--------------|
+| — | — | — | — |
+
+---
+
+## 17. Repository layout (target after implementation)
+
+```text
+backrest-operator/
+  SPEC.md
+  README.md
+  LICENSE
+  api/v1alpha1/           # CRD YAML
+  src/
+    backrest_operator/    # Kopf operator
+    backrest_mcp/         # MCP server
+    shared/               # clients, models, auth helpers
+  charts/backrest-operator/
+  config/                 # kustomize / webhook manifests
+  docs/
+  examples/               # generic examples only
+  tests/
+  Dockerfile
+  Dockerfile.mcp
+  Makefile
+  pyproject.toml
+  .github/workflows/
+```
+
+---
+
+## 18. Implementation notes
+
+- Always unquiesce in `finally` unless explicit `leaveDown`.
+- Prefer narrow Jobs with TTL after finished.
+- Never log restic passwords or bearer tokens.
+- Keep examples free of private domains and vendor lock-in beyond documented optional drivers (TopoLVM, CSI).
+- Chart `home` / `sources` point at this GitHub repository (personal account) and upstream Backrest.

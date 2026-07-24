@@ -1,0 +1,136 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: backuprepositories.operator.backrest.io
+  labels:
+    app.kubernetes.io/name: backrest-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: operator.backrest.io
+  scope: Namespaced
+  names:
+    plural: backuprepositories
+    singular: backuprepository
+    kind: BackupRepository
+    shortNames:
+      - bkrepo
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - url
+                - passwordSecretRef
+              properties:
+                url:
+                  type: string
+                  description: >-
+                    Full restic repository URL (s3:, b2:, azure:, gs:, sftp:,
+                    rclone:, local path, etc.).
+                passwordSecretRef:
+                  type: object
+                  required:
+                    - name
+                    - key
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      type: string
+                envFromSecretRef:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                  required:
+                    - name
+                appendOnly:
+                  type: boolean
+                  description: >-
+                    When true, configure restic append-only policy / flags.
+                  default: false
+                verify:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      description: Enable scheduled restic check.
+                      default: true
+                    schedule:
+                      type: string
+                      description: Cron expression for restic check cadence.
+                      default: "0 3 * * 0"
+                shared:
+                  type: boolean
+                  description: Mark repository as shared in Backrest multihost mode.
+                  default: true
+                backrest:
+                  type: object
+                  properties:
+                    syncToHost:
+                      type: boolean
+                      default: true
+                    clusterRef:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                        - name
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Ready
+                    - Degraded
+                    - Failed
+                resticURL:
+                  type: string
+                lastCheckTime:
+                  type: string
+                  format: date-time
+                lastCheckResult:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Restic URL
+          type: string
+          jsonPath: .status.resticURL
+          priority: 1
+        - name: Last Check
+          type: date
+          jsonPath: .status.lastCheckTime
+        - name: Check Result
+          type: string
+          jsonPath: .status.lastCheckResult
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

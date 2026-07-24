@@ -1,0 +1,19 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCRestore
+metadata:
+  name: export-restore
+  namespace: app
+spec:
+  mode: export
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  restic:
+    snapshotID: latest
+    pathFilters:
+      - /var/lib/myapp
+  export:
+    enabled: true
+    ttlSeconds: 3600
+    oneShot: true
+    format: tar

@@ -1,0 +1,174 @@
+{{- if .Values.rbac.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "backrest-operator.operatorClusterRoleName" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+rules:
+  # Kopf leader election and events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Core workload objects managed by the operator
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "persistentvolumeclaims", "pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CSI snapshots
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots", "volumesnapshotcontents", "volumesnapshotclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Backrest CRDs
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters
+      - backuprepositories
+      - backupplans
+      - pvcbackups
+      - pvcrestores
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters/status
+      - backuprepositories/status
+      - backupplans/status
+      - pvcbackups/status
+      - pvcrestores/status
+      - backrestclusters/finalizers
+      - backuprepositories/finalizers
+      - backupplans/finalizers
+      - pvcbackups/finalizers
+      - pvcrestores/finalizers
+    verbs: ["get", "update", "patch"]
+  # Read-only access to PVCs and namespaces for reconciliation
+  - apiGroups: [""]
+    resources: ["namespaces", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Validating webhook configuration (when operator registers webhooks)
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "backrest-operator.mcpClusterRoleName" . }}
+  labels:
+    {{- include "backrest-operator.mcpLabels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews", "selfsubjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["users", "groups", "serviceaccounts"]
+    verbs: ["impersonate"]
+{{- if .Values.rbac.userRoles.viewer.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "backrest-operator.viewerClusterRoleName" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+    rbac.backrest.io/role: viewer
+rules:
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters
+      - backuprepositories
+      - backupplans
+      - pvcbackups
+      - pvcrestores
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters/status
+      - backuprepositories/status
+      - backupplans/status
+      - pvcbackups/status
+      - pvcrestores/status
+    verbs: ["get"]
+{{- end }}
+{{- if .Values.rbac.userRoles.operator.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "backrest-operator.userOperatorClusterRoleName" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+    rbac.backrest.io/role: operator
+rules:
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters
+      - backuprepositories
+      - backupplans
+      - pvcbackups
+      - pvcrestores
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters/status
+      - backuprepositories/status
+      - backupplans/status
+      - pvcbackups/status
+      - pvcrestores/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch"]
+{{- end }}
+{{- if .Values.rbac.userRoles.admin.create }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "backrest-operator.adminClusterRoleName" . }}
+  labels:
+    {{- include "backrest-operator.labels" . | nindent 4 }}
+    rbac.backrest.io/role: admin
+rules:
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters
+      - backuprepositories
+      - backupplans
+      - pvcbackups
+      - pvcrestores
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["operator.backrest.io"]
+    resources:
+      - backrestclusters/status
+      - backuprepositories/status
+      - backupplans/status
+      - pvcbackups/status
+      - pvcrestores/status
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}
+{{- end }}

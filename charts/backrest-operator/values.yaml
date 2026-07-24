@@ -1,0 +1,143 @@
+# Default values for backrest-operator.
+# See SPEC section 10 for the canonical chart surface.
+
+nameOverride: ""
+fullnameOverride: ""
+
+namespace:
+  create: true
+  name: backrest-system
+
+imagePullSecrets: []
+
+operator:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/example/backrest-operator
+    tag: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  watch:
+    namespaces: []                     # empty = all namespaces
+    labelSelector: ""
+  resources: {}
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  metrics:
+    port: 8080
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: metrics
+    initialDelaySeconds: 15
+    periodSeconds: 20
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: metrics
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  webhook:
+    enabled: true
+    port: 9443
+    certManager:
+      enabled: true
+      issuerRef:
+        kind: ClusterIssuer
+        name: selfsigned-issuer
+      duration: 8760h
+      renewBefore: 720h
+
+mcp:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ghcr.io/example/backrest-mcp
+    tag: ""
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+  service:
+    type: ClusterIP
+    port: 8081
+    metricsPort: 8082
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: backrest-mcp.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  resources: {}
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext: {}
+  securityContext: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 20
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+backrest:
+  image:
+    repository: ghcr.io/garethgeorge/backrest
+    tag: v1.14.1                         # empty = v{Chart.AppVersion}
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  vmServiceScrape:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  prometheusRules:
+    enabled: true
+    labels: {}
+  vmRules:
+    enabled: true
+    labels: {}
+  grafanaDashboard:
+    enabled: true
+    labels: {}
+  storageUsageWarningRatio: 0.8
+  storageUsageCriticalRatio: 0.95
+  backupSlaWindow: 24h
+  backupSlaSeconds: 86400
+
+rbac:
+  create: true
+  userRoles:
+    viewer:
+      create: true
+    operator:
+      create: true
+    admin:
+      create: true

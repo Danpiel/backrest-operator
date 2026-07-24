@@ -1,0 +1,20 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCBackup
+metadata:
+  name: app-data-csi
+  namespace: app
+spec:
+  pvcName: app-data
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  strategy:
+    pipeline:
+      - csiSnapshot
+  volumeSnapshotClassName: csi-hostpath-snapclass
+  paths:
+    - /
+  retention:
+    keepLast: 5
+    deleteVolumeSnapshotAfterUpload: true
+  ttlSecondsAfterFinished: 86400
