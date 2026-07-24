@@ -5,6 +5,8 @@ Kubernetes operator for [Backrest](https://github.com/garethgeorge/backrest) (re
 | | |
 |---|---|
 | API group | `operator.backrest.io/v1alpha1` |
+| Operator | Go (controller-runtime) |
+| MCP | Go (HTTP JSON-RPC + stdio) |
 | Backrest image | `ghcr.io/garethgeorge/backrest:v1.14.1` |
 | License | Apache-2.0 |
 | Spec | [SPEC.md](./SPEC.md) |
@@ -53,9 +55,10 @@ Generic manifests in [examples/](./examples/):
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest -q
-make lint
+go test ./...
+go build -o bin/operator ./cmd/operator
+go build -o bin/mcp ./cmd/mcp
+make docker
 ```
 
 ## Features

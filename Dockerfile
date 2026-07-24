@@ -1,15 +1,18 @@
-FROM python:3.12-slim
+# Go operator (+ export-proxy for PVCRestore export Jobs)
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY api ./api
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/operator ./cmd/operator \
+ && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/export-proxy ./cmd/export-proxy
 
-RUN useradd -r -u 65532 -m nonroot
-WORKDIR /app
-
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
-
-RUN pip install --upgrade pip setuptools wheel \
- && pip install --no-cache-dir . \
- && python -c "import backrest_operator, backrest_mcp, shared"
-
+FROM gcr.io/distroless/static:nonroot
+WORKDIR /
+COPY --from=build /out/operator /operator
+COPY --from=build /out/export-proxy /export-proxy
 USER 65532:65532
 EXPOSE 8080 8081 9443
-ENTRYPOINT ["python", "-m", "backrest_operator"]
+ENTRYPOINT ["/operator"]

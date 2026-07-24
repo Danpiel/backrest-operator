@@ -151,29 +151,59 @@ restic -r s3:https://s3.example.com/my-bucket/backups dump latest /var/lib/myapp
 For a self-contained HTTP download similar to the operator's export mode, run a short-lived Pod that serves the dump:
 
 ```yaml
-apiVersion: v1
-kind: Pod
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: restic-export
   namespace: app
 spec:
-  restartPolicy: Never
-  containers:
-    - name: export
-      image: restic/restic:0.19.1
-      command: ["/bin/sh", "-c"]
-      args:
-        - |
-          restic dump latest / > /tmp/archive.tar
-          python3 -m http.server 8080 --directory /tmp
-      ports:
-        - containerPort: 8080
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: restic-export
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: restic
+          image: restic/restic:0.19.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              mkdir -p /work/out
+              restic restore latest --target /work/out
+              cd /work/out && tar -cf /work/archive.tar .
+          envFrom:
+            - secretRef:
+                name: backup-repo
+          volumeMounts:
+            - name: work
+              mountPath: /work
+      containers:
+        - name: export
+          image: ghcr.io/danpiel/backrest-operator:latest
+          command: ["/export-proxy"]
+          env:
+            - name: EXPORT_TOKEN
+              value: "replace-me"
+            - name: EXPORT_FILE
+              value: /work/archive.tar
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: work
+              mountPath: /work
+              readOnly: true
+      volumes:
+        - name: work
+          emptyDir: {}
 ```
 
 ```bash
-kubectl port-forward pod/restic-export 8080:8080 -n app
-curl -fL -o backup.tar "http://127.0.0.1:8080/archive.tar"
-kubectl delete pod restic-export -n app
+kubectl port-forward job/restic-export 8080:8080 -n app
+curl -fL -o backup.tar "http://127.0.0.1:8080/replace-me/archive.tar"
+kubectl delete job restic-export -n app
 ```
 
 > **Security:** Production export flows should use random tokens, TTL, and ClusterIP-only Services. The operator's `PVCRestore` export mode implements this pattern.

@@ -7,13 +7,16 @@ metadata:
   labels:
     {{- include "backrest-operator.labels" . | nindent 4 }}
 rules:
-  # Kopf leader election and events
+  # Events and optional leader election
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch", "update"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
   # Core workload objects managed by the operator
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "persistentvolumeclaims", "pods", "pods/log"]

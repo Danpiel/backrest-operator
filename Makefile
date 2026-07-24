@@ -1,17 +1,21 @@
-.PHONY: test lint install docker chart-package
+.PHONY: test lint docker chart-package build
 
-install:
-	pip install -e ".[dev]"
+GO ?= go
+
+build:
+	$(GO) build -o bin/operator ./cmd/operator
+	$(GO) build -o bin/mcp ./cmd/mcp
+	$(GO) build -o bin/export-proxy ./cmd/export-proxy
 
 test:
-	pytest -q
+	$(GO) test ./...
 
 lint:
-	python -m compileall -q src
+	$(GO) vet ./...
 
 docker:
-	docker build -t backrest-operator:0.1.0 -f Dockerfile .
-	docker build -t backrest-mcp:0.1.0 -f Dockerfile.mcp .
+	docker build -t backrest-operator:0.2.0 -f Dockerfile .
+	docker build -t backrest-mcp:0.2.0 -f Dockerfile.mcp .
 
 chart-package:
 	helm package charts/backrest-operator -d dist

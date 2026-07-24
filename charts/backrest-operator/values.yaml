@@ -13,7 +13,7 @@ imagePullSecrets: []
 operator:
   replicaCount: 1
   image:
-    repository: ghcr.io/example/backrest-operator
+    repository: ghcr.io/danpiel/backrest-operator
     tag: ""
     pullPolicy: IfNotPresent
   serviceAccount:
@@ -33,18 +33,6 @@ operator:
   affinity: {}
   metrics:
     port: 8080
-  livenessProbe:
-    httpGet:
-      path: /healthz
-      port: metrics
-    initialDelaySeconds: 15
-    periodSeconds: 20
-  readinessProbe:
-    httpGet:
-      path: /readyz
-      port: metrics
-    initialDelaySeconds: 5
-    periodSeconds: 10
   webhook:
     enabled: true
     port: 9443
@@ -60,7 +48,7 @@ mcp:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/example/backrest-mcp
+    repository: ghcr.io/danpiel/backrest-mcp
     tag: ""
     pullPolicy: IfNotPresent
   serviceAccount:

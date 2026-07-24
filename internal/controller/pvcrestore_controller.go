@@ -1,0 +1,334 @@
+package controller
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"time"
+
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
+	"github.com/Danpiel/backrest-operator/internal/filters"
+	"github.com/Danpiel/backrest-operator/internal/metrics"
+)
+
+type PVCRestoreReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var restore operatorv1alpha1.PVCRestore
+	if err := r.Get(ctx, req.NamespacedName, &restore); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !filters.ObjectAllowed(restore.Namespace, restore.Labels) {
+		return ctrl.Result{}, nil
+	}
+	if restore.Status.Phase == "Succeeded" {
+		return ctrl.Result{}, nil
+	}
+
+	mode := restore.Spec.Mode
+	switch mode {
+	case "fromVolumeSnapshot":
+		if err := r.restoreFromSnapshot(ctx, &restore); err != nil {
+			return r.fail(ctx, &restore, err)
+		}
+	case "export":
+		if err := r.restoreExport(ctx, &restore); err != nil {
+			return r.fail(ctx, &restore, err)
+		}
+	case "fromResticToNewPVC", "fromResticToExistingPVC":
+		if err := r.restoreRestic(ctx, &restore); err != nil {
+			return r.fail(ctx, &restore, err)
+		}
+	default:
+		return r.fail(ctx, &restore, fmt.Errorf("unknown mode %s", mode))
+	}
+	restore.Status.Phase = "Succeeded"
+	return ctrl.Result{}, r.Status().Update(ctx, &restore)
+}
+
+func (r *PVCRestoreReconciler) fail(ctx context.Context, restore *operatorv1alpha1.PVCRestore, err error) (ctrl.Result, error) {
+	metrics.ReconcileErrors.WithLabelValues("PVCRestore").Inc()
+	restore.Status.Phase = "Failed"
+	restore.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Failed", Status: "True", Message: err.Error()}}
+	_ = r.Status().Update(ctx, restore)
+	return ctrl.Result{}, err
+}
+
+func (r *PVCRestoreReconciler) restoreFromSnapshot(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+	name := restore.Spec.Target.NewPVC.Name
+	if name == "" {
+		name = restore.Name + "-pvc"
+	}
+	size := restore.Spec.Target.NewPVC.Size
+	if size == "" {
+		size = "10Gi"
+	}
+	apiGroup := "snapshot.storage.k8s.io"
+	modes := []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: restore.Namespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: modes,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+			},
+			DataSource: &corev1.TypedLocalObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VolumeSnapshot",
+				Name:     restore.Spec.VolumeSnapshotRef.Name,
+			},
+		},
+	}
+	if sc := restore.Spec.Target.NewPVC.StorageClassName; sc != "" {
+		pvc.Spec.StorageClassName = &sc
+	}
+	err := r.Create(ctx, pvc)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+	repoNS := restore.Spec.RepositoryRef.Namespace
+	if repoNS == "" {
+		repoNS = restore.Namespace
+	}
+	var repo operatorv1alpha1.BackupRepository
+	if err := r.Get(ctx, types.NamespacedName{Name: restore.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
+		return err
+	}
+	var pvcName string
+	var quiesceState map[string]int32
+	if restore.Spec.Mode == "fromResticToNewPVC" {
+		pvcName = restore.Spec.Target.NewPVC.Name
+		if pvcName == "" {
+			pvcName = restore.Name + "-pvc"
+		}
+		size := restore.Spec.Target.NewPVC.Size
+		if size == "" {
+			size = "10Gi"
+		}
+		pvc := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: restore.Namespace},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse(size)},
+				},
+			},
+		}
+		if sc := restore.Spec.Target.NewPVC.StorageClassName; sc != "" {
+			pvc.Spec.StorageClassName = &sc
+		}
+		if err := r.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	} else {
+		pvcName = restore.Spec.Target.ExistingPVCName
+		if pvcName == "" {
+			return fmt.Errorf("target.existingPVCName required")
+		}
+		if restore.Spec.Quiesce.Enabled {
+			// reuse PVCBackup reconciler helpers via local scale
+			br := &PVCBackupReconciler{Client: r.Client, Scheme: r.Scheme}
+			fake := &operatorv1alpha1.PVCBackup{
+				ObjectMeta: metav1.ObjectMeta{Namespace: restore.Namespace},
+				Spec:       operatorv1alpha1.PVCBackupSpec{Quiesce: restore.Spec.Quiesce},
+			}
+			var err error
+			quiesceState, err = br.quiesce(ctx, fake)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = br.unquiesce(ctx, restore.Namespace, quiesceState) }()
+		}
+	}
+	snap := restore.Spec.Restic.SnapshotID
+	if snap == "" {
+		snap = "latest"
+	}
+	cmd := []string{"restic", "restore", snap, "--target", "/data"}
+	for _, p := range restore.Spec.Restic.PathFilters {
+		cmd = append(cmd, "--include", p)
+	}
+	jobName := fmt.Sprintf("pvcrestore-%s-%d", restore.Name, time.Now().Unix())
+	if len(jobName) > 63 {
+		jobName = jobName[:63]
+	}
+	enableLinks := false
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace},
+		Spec: batchv1.JobSpec{
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					RestartPolicy:      corev1.RestartPolicyNever,
+					EnableServiceLinks: &enableLinks,
+					Containers: []corev1.Container{{
+						Name:    "restic",
+						Image:   resticImage,
+						Command: cmd,
+						Env:     resticEnv(&repo),
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: "data", MountPath: "/data",
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "data",
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+						},
+					}},
+				},
+			},
+		},
+	}
+	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	restore.Status.LastJobName = jobName
+	return nil
+}
+
+func (r *PVCRestoreReconciler) restoreExport(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+	repoNS := restore.Spec.RepositoryRef.Namespace
+	if repoNS == "" {
+		repoNS = restore.Namespace
+	}
+	var repo operatorv1alpha1.BackupRepository
+	if err := r.Get(ctx, types.NamespacedName{Name: restore.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
+		return err
+	}
+	token, err := randomToken(24)
+	if err != nil {
+		return err
+	}
+	ttl := restore.Spec.Export.TTLSeconds
+	if ttl == 0 {
+		ttl = 3600
+	}
+	snap := restore.Spec.Restic.SnapshotID
+	if snap == "" {
+		snap = "latest"
+	}
+	jobName := fmt.Sprintf("export-%s-%d", restore.Name, time.Now().Unix())
+	if len(jobName) > 63 {
+		jobName = jobName[:63]
+	}
+	labels := map[string]string{
+		"app.kubernetes.io/name":      "backrest-export",
+		"app.kubernetes.io/instance":  restore.Name,
+		"app.kubernetes.io/component": "export",
+	}
+	proxyImage := exportProxyImage()
+	enableLinks := false
+	ttlFin := ttl
+	env := append(resticEnv(&repo),
+		corev1.EnvVar{Name: "EXPORT_TOKEN", Value: token},
+		corev1.EnvVar{Name: "EXPORT_ONESHOT", Value: "1"},
+		corev1.EnvVar{Name: "EXPORT_FILE", Value: "/work/archive.tar"},
+	)
+	resticScript := fmt.Sprintf(`set -euo pipefail
+mkdir -p /work/out
+restic restore %s --target /work/out
+cd /work/out && tar -cf /work/archive.tar .
+`, snap)
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace, Labels: labels},
+		Spec: batchv1.JobSpec{
+			TTLSecondsAfterFinished: &ttlFin,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: corev1.PodSpec{
+					RestartPolicy:      corev1.RestartPolicyNever,
+					EnableServiceLinks: &enableLinks,
+					InitContainers: []corev1.Container{{
+						Name:         "restic",
+						Image:        resticImage,
+						Command:      []string{"sh", "-c", resticScript},
+						Env:          resticEnv(&repo),
+						VolumeMounts: []corev1.VolumeMount{{Name: "work", MountPath: "/work"}},
+					}},
+					Containers: []corev1.Container{{
+						Name:    "export",
+						Image:   proxyImage,
+						Command: []string{"/export-proxy"},
+						Env:     env,
+						Ports:   []corev1.ContainerPort{{Name: "http", ContainerPort: 8080}},
+						VolumeMounts: []corev1.VolumeMount{{
+							Name: "work", MountPath: "/work", ReadOnly: true,
+						}},
+					}},
+					Volumes: []corev1.Volume{{
+						Name: "work",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					}},
+				},
+			},
+		},
+	}
+	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	svcName := "export-" + restore.Name
+	if len(svcName) > 63 {
+		svcName = svcName[:63]
+	}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: restore.Namespace, Labels: labels},
+		Spec: corev1.ServiceSpec{
+			Selector: labels,
+			Ports:    []corev1.ServicePort{{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080)}},
+		},
+	}
+	if err := r.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	restore.Status.LastJobName = jobName
+	restore.Status.ExportURL = fmt.Sprintf("http://%s.%s.svc:8080/%s/archive.tar", svcName, restore.Namespace, token)
+	restore.Status.ExportExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second).UTC().Format(time.RFC3339)
+	return nil
+}
+
+func randomToken(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func exportProxyImage() string {
+	if v := os.Getenv("EXPORT_PROXY_IMAGE"); v != "" {
+		return v
+	}
+	if v := os.Getenv("OPERATOR_IMAGE"); v != "" {
+		return v
+	}
+	return "ghcr.io/danpiel/backrest-operator:latest"
+}
+
+func (r *PVCRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&operatorv1alpha1.PVCRestore{}).
+		Owns(&batchv1.Job{}).
+		Complete(r)
+}

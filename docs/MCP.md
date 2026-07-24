@@ -53,10 +53,12 @@ kubectl port-forward -n backrest-system svc/backrest-operator-mcp 8081:8081
 Run MCP with stdio transport for Cursor or other local MCP clients:
 
 ```bash
-MCP_MODE=stdio backrest-mcp
+MCP_MODE=stdio /mcp
+# or locally:
+MCP_MODE=stdio ./bin/mcp
 ```
 
-In stdio mode, the server uses the caller's kubeconfig identity (`mcp-stdio-local`). The same RBAC and destructive flags apply where SubjectAccessReview is available.
+In stdio mode, the server uses the caller's kubeconfig identity (`mcp-stdio-local`). Destructive tools still require `allow_destructive=true`.
 
 Example Cursor MCP config:
 
@@ -64,7 +66,7 @@ Example Cursor MCP config:
 {
   "mcpServers": {
     "backrest": {
-      "command": "backrest-mcp",
+      "command": "/path/to/mcp",
       "env": {
         "MCP_MODE": "stdio"
       }

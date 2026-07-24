@@ -6,7 +6,7 @@
 **License:** Apache-2.0  
 **Language:** English (code, docs, comments, examples)  
 **Upstream backup manager:** [garethgeorge/backrest](https://github.com/garethgeorge/backrest) (Web UI + orchestrator for [restic](https://restic.net/))  
-**Stack:** Python 3.12 monorepo — [Kopf](https://kopf.readthedocs.io/) operator + separate MCP server process  
+**Stack:** Go (controller-runtime) operator + Go MCP server (separate Deployment)  
 **Backrest image:** pin to the **latest stable** upstream release at each chart/operator release  
 
 This document is the single source of truth for implementing and evolving the project. Do not embed organization-specific infrastructure names, hostnames, buckets, or credentials in the repository.
@@ -681,20 +681,22 @@ backrest-operator/
   SPEC.md
   README.md
   LICENSE
-  api/v1alpha1/           # CRD YAML
-  src/
-    backrest_operator/    # Kopf operator
-    backrest_mcp/         # MCP server
-    shared/               # clients, models, auth helpers
+  api/v1alpha1/           # Go types + CRD YAML
+  cmd/operator/           # operator entrypoint
+  cmd/mcp/                # MCP entrypoint
+  internal/
+    controller/           # reconcilers
+    webhook/              # validating admission
+    mcp/                  # MCP auth, tools, HTTP/stdio
+    filters/
+    metrics/
   charts/backrest-operator/
-  config/                 # kustomize / webhook manifests
   docs/
-  examples/               # generic examples only
-  tests/
+  examples/
   Dockerfile
   Dockerfile.mcp
   Makefile
-  pyproject.toml
+  go.mod
   .github/workflows/
 ```
 

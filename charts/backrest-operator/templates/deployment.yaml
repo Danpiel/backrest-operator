@@ -46,6 +46,10 @@ spec:
               value: {{ .Values.operator.watch.labelSelector | quote }}
             - name: DEFAULT_BACKREST_IMAGE
               value: {{ include "backrest-operator.backrestImage" . | quote }}
+            - name: OPERATOR_IMAGE
+              value: {{ include "backrest-operator.operatorImage" . | quote }}
+            - name: EXPORT_PROXY_IMAGE
+              value: {{ include "backrest-operator.operatorImage" . | quote }}
             - name: METRICS_PORT
               value: {{ .Values.operator.metrics.port | quote }}
             - name: WEBHOOK_ENABLED
@@ -80,7 +84,7 @@ spec:
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: health
             initialDelaySeconds: 5
             periodSeconds: 10
