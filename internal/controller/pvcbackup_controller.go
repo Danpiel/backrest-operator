@@ -26,7 +26,10 @@ import (
 	"github.com/Danpiel/backrest-operator/internal/metrics"
 )
 
-const annForceRun = "operator.backrest.io/force-run"
+const (
+	annForceRun     = "operator.backrest.io/force-run"
+	annQuiesceState = "operator.backrest.io/quiesce-state"
+)
 
 var volumeSnapshotGVK = schema.GroupVersionKind{
 	Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot",
@@ -81,7 +84,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	started := time.Now()
 	var quiesceState map[string]int32
+	holdQuiesceForJob := false
 	defer func() {
+		// Keep workloads down while the restic Job is still running.
+		if holdQuiesceForJob {
+			return
+		}
 		if !backup.Spec.Quiesce.LeaveDown && len(quiesceState) > 0 {
 			_ = r.unquiesce(ctx, backup.Namespace, quiesceState)
 		}
@@ -160,6 +168,10 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVCs); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
+	if err := r.persistQuiesceState(ctx, &backup, quiesceState); err != nil {
+		logger.Error(err, "persist quiesce state")
+	}
+	holdQuiesceForJob = true
 	backup.Status.LastJobName = jobName
 	_ = r.Status().Update(ctx, &backup)
 	return r.pollBackupJob(ctx, &backup)
@@ -170,9 +182,11 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 	jobName := backup.Status.LastJobName
 	var job batchv1.Job
 	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: backup.Namespace}, &job); err != nil {
+		_ = r.releaseQuiesce(ctx, backup)
 		return r.fail(ctx, backup, fmt.Errorf("restic job %s: %w", jobName, err))
 	}
 	if job.Status.Succeeded > 0 {
+		_ = r.releaseQuiesce(ctx, backup)
 		if force := backup.Annotations[annForceRun]; force != "" {
 			backup.Status.LastForceRun = force
 		}
@@ -197,11 +211,67 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		return ctrl.Result{}, nil
 	}
 	if job.Status.Failed > 0 {
+		_ = r.releaseQuiesce(ctx, backup)
 		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "failure").Inc()
 		return r.fail(ctx, backup, fmt.Errorf("restic job failed"))
 	}
 	logger.Info("waiting for restic job", "job", jobName)
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+func (r *PVCBackupReconciler) persistQuiesceState(ctx context.Context, b *operatorv1alpha1.PVCBackup, state map[string]int32) error {
+	if len(state) == 0 {
+		return nil
+	}
+	raw, err := jsonMarshal(state)
+	if err != nil {
+		return err
+	}
+	var cur operatorv1alpha1.PVCBackup
+	if err := r.Get(ctx, types.NamespacedName{Name: b.Name, Namespace: b.Namespace}, &cur); err != nil {
+		return err
+	}
+	if cur.Annotations == nil {
+		cur.Annotations = map[string]string{}
+	}
+	cur.Annotations[annQuiesceState] = string(raw)
+	return r.Update(ctx, &cur)
+}
+
+func (r *PVCBackupReconciler) releaseQuiesce(ctx context.Context, b *operatorv1alpha1.PVCBackup) error {
+	if b.Spec.Quiesce.LeaveDown {
+		return r.clearQuiesceAnnotation(ctx, b)
+	}
+	state := map[string]int32{}
+	if raw := b.Annotations[annQuiesceState]; raw != "" {
+		_ = jsonUnmarshal([]byte(raw), &state)
+	}
+	if len(state) == 0 {
+		// Fallback: scale targets back to 1.
+		for _, t := range b.Spec.Quiesce.Targets {
+			ns := t.Namespace
+			if ns == "" {
+				ns = b.Namespace
+			}
+			state[t.Kind+"/"+ns+"/"+t.Name] = 1
+		}
+	}
+	if err := r.unquiesce(ctx, b.Namespace, state); err != nil {
+		return err
+	}
+	return r.clearQuiesceAnnotation(ctx, b)
+}
+
+func (r *PVCBackupReconciler) clearQuiesceAnnotation(ctx context.Context, b *operatorv1alpha1.PVCBackup) error {
+	var cur operatorv1alpha1.PVCBackup
+	if err := r.Get(ctx, types.NamespacedName{Name: b.Name, Namespace: b.Namespace}, &cur); err != nil {
+		return err
+	}
+	if cur.Annotations == nil || cur.Annotations[annQuiesceState] == "" {
+		return nil
+	}
+	delete(cur.Annotations, annQuiesceState)
+	return r.Update(ctx, &cur)
 }
 
 func pvcList(b *operatorv1alpha1.PVCBackup) []string {
