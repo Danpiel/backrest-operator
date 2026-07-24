@@ -150,6 +150,7 @@ func (r *BackrestClusterReconciler) ensureHost(ctx context.Context, c *operatorv
 		ObjectMeta: metav1.ObjectMeta{Name: hostName, Namespace: ns, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -360,6 +361,7 @@ func (r *BackrestClusterReconciler) createOrUpdateDep(ctx context.Context, desir
 		}
 	}
 	cur.Spec.Replicas = desired.Spec.Replicas
+	cur.Spec.Strategy = desired.Spec.Strategy
 	cur.Spec.Template = desired.Spec.Template
 	if desired.Labels != nil {
 		cur.Labels = desired.Labels
