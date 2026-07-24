@@ -50,6 +50,8 @@ Generic manifests in [examples/](./examples/):
 - `backupplan.yaml` — Scheduled plan with retention
 - `pvcbackup-csi.yaml` / `pvcbackup-quiesced.yaml` — PVC backup strategies
 - `pvcrestore-existing.yaml` / `pvcrestore-export.yaml` — Restore modes
+- `ingress-ui-https.yaml` — HTTPS Ingress (cert-manager + Traefik) + HTTP redirect
+- `oauth2-proxy.yaml` — oauth2-proxy reverse-proxy in front of the UI
 - `auth-secret.yaml`, `externalsecret.yaml`, `rbac-binding.yaml`
 
 ## Development
