@@ -1,0 +1,33 @@
+# Multi-PVC quiesced backup: one schedule, both claims, both workloads stopped together.
+# Declare only this CR — the operator owns Jobs and schedule reconciliation.
+apiVersion: operator.backrest.io/v1alpha1
+kind: PVCBackup
+metadata:
+  name: app-data-multi
+  namespace: app
+spec:
+  pvcNames:
+    - app-data-0
+    - app-data-1
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  schedule: "0 */12 * * *"
+  strategy:
+    pipeline:
+      - quiescedLive
+  quiesce:
+    enabled: true
+    timeoutSeconds: 900
+    targets:
+      - kind: StatefulSet
+        name: app-a
+        action: scaleToZero
+      - kind: StatefulSet
+        name: app-b
+        action: scaleToZero
+  nodeSelector:
+    kubernetes.io/hostname: worker-01
+  retention:
+    keepLast: 6
+  ttlSecondsAfterFinished: 86400

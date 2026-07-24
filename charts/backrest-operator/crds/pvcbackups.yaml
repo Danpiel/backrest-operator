@@ -149,8 +149,9 @@ spec:
                   type: string
                   description: >-
                     Cron schedule for recurring backups. Empty means one-shot.
-                    The operator creates and owns the CronJob (and a minimal
-                    trigger ServiceAccount/Role in the PVC namespace).
+                    The operator reconciles the schedule in-process (no
+                    per-backup CronJob). Annotate with
+                    operator.backrest.io/force-run to trigger immediately.
                 nodeSelector:
                   type: object
                   additionalProperties:

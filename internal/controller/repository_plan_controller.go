@@ -56,6 +56,8 @@ func (r *BackupRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	} else {
 		repo.Status.LastCheckResult = "skipped"
+		name := "restic-check-" + repo.Name
+		_ = client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: repo.Namespace}}))
 	}
 	return ctrl.Result{}, r.Status().Update(ctx, &repo)
 }

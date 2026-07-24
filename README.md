@@ -46,12 +46,12 @@ Bind your user to a shipped ClusterRole before using MCP — see [examples/rbac-
 Generic manifests in [examples/](./examples/):
 
 - `backrestcluster.yaml` — Backrest host + agents
+- `ingress-ui-https.yaml` — HTTPS via `BackrestCluster.spec.host.ingress` (+ optional HTTP redirect)
+- `oauth2-proxy.yaml` — oauth2-proxy reverse-proxy (companion Service for Ingress backend)
 - `backuprepository-s3.yaml` — S3 restic repository with scheduled verify
-- `backupplan.yaml` — Scheduled plan with retention
-- `pvcbackup-csi.yaml` / `pvcbackup-quiesced.yaml` — PVC backup strategies
+- `backupplan.yaml` — Plan fragment stub (prefer PVCBackup until Backrest sync lands)
+- `pvcbackup-csi.yaml` / `pvcbackup-quiesced.yaml` / `pvcbackup-multi.yaml` — PVC backup strategies
 - `pvcrestore-existing.yaml` / `pvcrestore-export.yaml` — Restore modes
-- `ingress-ui-https.yaml` — HTTPS Ingress (cert-manager + Traefik) + HTTP redirect
-- `oauth2-proxy.yaml` — oauth2-proxy reverse-proxy in front of the UI
 - `auth-secret.yaml`, `externalsecret.yaml`, `rbac-binding.yaml`
 
 ## Development
@@ -65,14 +65,14 @@ make docker
 
 ## Features
 
-- Backrest host + agents (multihost), optional Ingress and UI auth
-- CRDs for repositories, plans, PVC backup/restore
-- Backup modes: live flush, quiesced copy, CSI and TopoLVM snapshots
-- All restic/Backrest storage backends; append-only switch; scheduled `restic check`
-- Restore to existing/new PVC, partial paths, export download (curl / MCP)
+- Backrest host + agents (multihost); **operator-owned Ingress** (annotations / TLS / oauth2 backend)
+- CRDs for repositories, PVC backup/restore; BackupPlan stub until host sync
+- Backup modes: quiesced multi-PVC, CSI/TopoLVM snapshots (single PVC)
+- In-process `PVCBackup` schedules + repository `restic check` CronJobs
+- Restore to existing/new PVC and export Jobs (Job completion tracking improving)
 - Separate MCP Deployment (HTTP + stdio) with TokenReview / SAR / impersonation
 - Prometheus & VictoriaMetrics scrapes, embedded alerts, Grafana dashboard
-- Validating webhooks for CRDs and AI-shaped requests
+- Validating webhooks (`pvcName` or `pvcNames`)
 
 ## License
 

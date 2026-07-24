@@ -36,3 +36,17 @@ func TestValidatePVCBackupNeedsVSC(t *testing.T) {
 		t.Fatal("expected message")
 	}
 }
+
+func TestValidatePVCBackupAcceptsPVCNames(t *testing.T) {
+	raw, _ := json.Marshal(map[string]interface{}{
+		"spec": map[string]interface{}{
+			"pvcNames":      []string{"a", "b"},
+			"repositoryRef": map[string]string{"name": "repo"},
+			"strategy":      map[string]interface{}{"pipeline": []string{"quiescedLive"}},
+		},
+	})
+	ok, msg := webhook.ValidateObject("PVCBackup", raw)
+	if !ok {
+		t.Fatalf("expected ok, got %s", msg)
+	}
+}

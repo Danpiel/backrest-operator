@@ -1,42 +1,51 @@
-# Example: expose Backrest UI over HTTPS with cert-manager + Traefik.
-# Replace hostnames, issuer, and IngressClass for your cluster.
-#
-# Pocket ID / OIDC redirect URI must match:
-#   https://backrest.example.com/oauth2/callback
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+# HTTPS UI via BackrestCluster.spec.host.ingress (operator-owned).
+# oauth2-proxy is an optional companion Service; point backendServiceName at it.
+# See also examples/oauth2-proxy.yaml for the IdP frontend Deployment.
+apiVersion: operator.backrest.io/v1alpha1
+kind: BackrestCluster
 metadata:
-  name: backrest-ui
+  name: main
   namespace: backrest-system
-  labels:
-    app.kubernetes.io/name: backrest
-    app.kubernetes.io/component: ui
-    app.kubernetes.io/part-of: backrest-operator
-  annotations:
-    cert-manager.io/cluster-issuer: letsencrypt-prod
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
-  ingressClassName: traefik
-  tls:
-    - hosts:
-        - backrest.example.com
-      secretName: backrest-example-com-tls
-  rules:
-    - host: backrest.example.com
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                # oauth2-proxy reverse-proxy in front of Backrest (recommended),
-                # or point directly at backrest-host-main:9898 if auth is handled elsewhere.
-                name: backrest-oauth2-proxy
-                port:
-                  number: 4180
+  version: v1.14.1
+  image: ghcr.io/garethgeorge/backrest
+  host:
+    replicas: 1
+    serviceType: ClusterIP
+    enableServiceLinks: false
+    ingress:
+      enabled: true
+      className: traefik
+      host: backrest.example.com
+      # Optional: terminate auth at oauth2-proxy instead of the Backrest Service.
+      backendServiceName: backrest-oauth2-proxy
+      backendServicePort: 4180
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        traefik.ingress.kubernetes.io/router.entrypoints: websecure
+        traefik.ingress.kubernetes.io/router.tls: "true"
+      tls:
+        - hosts:
+            - backrest.example.com
+          secretName: backrest-example-com-tls
+    persistence:
+      size: 20Gi
+      storageClassName: standard
+  agents:
+    enabled: true
+    mode: DaemonSet
+    multihost:
+      permissions:
+        - ReadOperations
+        - ReceiveSharedRepos
+  auth:
+    enabled: false
+  monitoring:
+    enabled: true
+  mcp:
+    enabled: true
 ---
+# Optional Traefik-only HTTP→HTTPS redirect (not part of BackrestCluster).
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -44,7 +53,6 @@ metadata:
   namespace: backrest-system
   labels:
     app.kubernetes.io/name: backrest
-    app.kubernetes.io/component: ui
     app.kubernetes.io/part-of: backrest-operator
 spec:
   redirectScheme:
@@ -58,7 +66,6 @@ metadata:
   namespace: backrest-system
   labels:
     app.kubernetes.io/name: backrest
-    app.kubernetes.io/component: ui
     app.kubernetes.io/part-of: backrest-operator
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web

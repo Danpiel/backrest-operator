@@ -14,6 +14,11 @@ spec:
       enabled: false
       className: nginx
       host: backrest.example.com
+      # When enabled, optional fields:
+      # annotations: {}
+      # backendServiceName: backrest-oauth2-proxy
+      # backendServicePort: 4180
+      # tls: []
     persistence:
       size: 20Gi
       storageClassName: standard
@@ -26,6 +31,9 @@ spec:
   agents:
     enabled: true
     mode: DaemonSet
+    # Use existing node labels / taints — do not invent new label keys.
+    nodeSelector: {}
+    tolerations: []
     multihost:
       serverURL: ""
       permissions:

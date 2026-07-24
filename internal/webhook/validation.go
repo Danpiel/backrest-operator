@@ -46,8 +46,8 @@ func ValidateObject(kind string, raw []byte) (bool, string) {
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			return false, err.Error()
 		}
-		if obj.Spec.PVCName == "" {
-			return false, "spec.pvcName is required"
+		if obj.Spec.PVCName == "" && len(obj.Spec.PVCNames) == 0 {
+			return false, "spec.pvcName or spec.pvcNames is required"
 		}
 		if obj.Spec.RepositoryRef.Name == "" {
 			return false, "spec.repositoryRef.name is required"
@@ -57,6 +57,12 @@ func ValidateObject(kind string, raw []byte) (bool, string) {
 				if obj.Spec.VolumeSnapshotClassName == "" {
 					return false, "volumeSnapshotClassName required for snapshot strategies"
 				}
+				if len(obj.Spec.PVCNames) > 1 {
+					return false, "csiSnapshot/topolvmSnapshot support a single PVC; use quiescedLive for multi-PVC"
+				}
+			}
+			if s == "liveFlush" {
+				return false, "liveFlush is not implemented yet"
 			}
 		}
 		if obj.Spec.Quiesce.LeaveDown && obj.Annotations[leaveDownAnnotation] != "true" {

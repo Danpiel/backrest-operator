@@ -1,5 +1,7 @@
 # Manual Backup Runbook (Without the Operator)
 
+> **Day-2 path:** use a `PVCBackup` CR. This document is for operator-unavailable / emergency / educational use only.
+
 Use this runbook when the Backrest Operator is unavailable, you need an emergency backup, or you want to understand what the operator automates.
 
 This procedure combines a **CSI VolumeSnapshot** (point-in-time block copy) with a **restic backup** (deduplicated off-cluster storage).

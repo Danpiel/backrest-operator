@@ -11,6 +11,30 @@
 
 This document is the single source of truth for implementing and evolving the project. Do not embed organization-specific infrastructure names, hostnames, buckets, or credentials in the repository.
 
+### Operator model (non-negotiable)
+
+Users declare **Custom Resources only**. The operator owns derived objects (Deployments, DaemonSets, Services, Ingresses, Jobs, CronJobs for repository verify, mirrored Secrets). Do **not** ship hand-rolled ServiceAccounts, Roles, CronJobs, or backup scripts in consumer overlays for features the CRDs already cover.
+
+### Implementation status (honest)
+
+| Area | Status |
+|------|--------|
+| `BackrestCluster` host + agents + Ingress (annotations / TLS / backend Service) | **Implemented** |
+| Agent `nodeSelector` + `tolerations` | **Implemented** |
+| `BackupRepository` + verify CronJob (`restic check`) | **Implemented** |
+| `PVCBackup` quiescedLive, multi-PVC (`pvcNames`), schedule (in-process cron), retention keepLast, nodeSelector | **Implemented** |
+| `PVCBackup` CSI/TopoLVM snapshot (single PVC), wait ReadyToUse | **Implemented** |
+| `PVCBackup` `liveFlush` / flush exec | **Not implemented** (webhook rejects `liveFlush`) |
+| `PVCBackup` quiesce `deletePods` | **Not implemented** (scaleToZero only) |
+| `BackupPlan` → live Backrest plan sync | **Stub** (writes `ConfigMap/backrest-plans` fragments; host does not mount/apply them yet) |
+| `BackupRepository.backrest.syncToHost` | **Not wired** |
+| `appendOnly` enforcement | **Field only** (not enforced on Jobs/MCP yet) |
+| UI `auth.existingSecret` | **Field only** |
+| `PVCRestore` existing/new/export | **Partial** (Jobs created; success may be reported before Job completes) |
+| Validating webhooks | **Implemented** (pvcName \| pvcNames) |
+| MCP TokenReview / SAR / impersonation | **Implemented** (tool catalog subset of §6.6) |
+| Monitoring embeds (ServiceMonitor / VM* / Grafana) | **Implemented** (chart toggles) |
+
 ---
 
 ## 1. Goals
@@ -112,6 +136,9 @@ spec:
       enabled: false
       className: ""
       host: backrest.example.com
+      annotations: {}                  # cert-manager, external-dns, Traefik, …
+      backendServiceName: ""           # empty = Backrest host Service; set to oauth2-proxy when used
+      backendServicePort: 0            # 0 = Backrest port 9898
       tls: []
     persistence:
       size: 20Gi
@@ -187,7 +214,9 @@ status:
 
 ### 3.3 `BackupPlan`
 
-Schedules and retention with Backrest parity (cron, hooks, forget policy).
+Schedules and retention intended for Backrest parity (cron, hooks, forget policy).
+
+> **Current behavior:** the reconciler writes plan fragments into `ConfigMap/backrest-plans`. The Backrest host Deployment does **not** yet mount or apply those fragments. Prefer `PVCBackup` for Kubernetes-orchestrated backups until plan sync is implemented.
 
 ```yaml
 apiVersion: operator.backrest.io/v1alpha1
@@ -211,7 +240,7 @@ spec:
     keepWeekly: 4
     keepMonthly: 6
     keepYearly: 0
-  hooks:                               # Backrest/bash hooks
+  hooks:                               # Backrest/bash hooks (future sync)
     - condition: CONDITION_SNAPSHOT_START
       action: shell
       command: |
@@ -220,7 +249,6 @@ spec:
         echo "pre-backup"
   tags:
     - k8s
-  # Optional link to PVC-centric orchestration
   pvcBackupRef:
     name: ""
     namespace: ""
@@ -233,7 +261,7 @@ status:
 
 ### 3.4 `PVCBackup`
 
-PVC-centric backup with strategy pipeline.
+PVC-centric backup with strategy pipeline. **This is the primary day-2 backup CR.**
 
 ```yaml
 apiVersion: operator.backrest.io/v1alpha1
@@ -242,27 +270,24 @@ metadata:
   name: app-pvc
   namespace: app
 spec:
+  # One of pvcName or pvcNames (multi-volume, one quiesce window)
   pvcName: app-data
+  # pvcNames: ["app-data-0", "app-data-1"]
   repositoryRef:
     name: primary
     namespace: backrest-system
-  # Ordered pipeline; each step may be skipped if empty
   strategy:
     pipeline:
-      - liveFlush                      # optional flush while app runs
-      - csiSnapshot                    # or topolvmSnapshot
-      # - quiescedLive                 # alternative/combo: stop pods then file copy
+      - quiescedLive                   # default when pipeline empty
+      # - csiSnapshot                  # single PVC only
+      # - topolvmSnapshot
+      # - liveFlush                    # not implemented (admission rejects)
   volumeSnapshotClassName: ""          # required for snapshot steps
   flush:
     enabled: false
-    # Exec into a pod OR run a Job script before snapshot/copy
-    mode: exec                         # exec | script
-    targetPod:
-      labelSelector:
-        app: database
-      container: db
-      command: ["bash", "-c", "FLUSH TABLES WITH READ LOCK; sleep 2"]
-    script: ""                         # used when mode=script (ConfigMap/inline)
+    mode: exec
+    targetPod: {}
+    script: ""
   quiesce:
     enabled: false
     timeoutSeconds: 900
@@ -271,10 +296,12 @@ spec:
       - apiVersion: apps/v1
         kind: StatefulSet
         name: app
-        # action: scaleToZero | deletePods
-  paths: ["/"]
+        namespace: ""                   # empty = PVCBackup namespace
+        # action: scaleToZero          # deletePods not implemented
+  paths: []                            # empty = /data/<pvcName> mounts; do not default to "/"
   excludes: []
-  schedule: ""                         # CronJob when set; else one-shot
+  schedule: ""                         # cron; reconciled in-process (no per-CR CronJob)
+  nodeSelector: {}                     # restic Job (required for RWO/local volumes)
   retention:
     keepLast: 6
     deleteVolumeSnapshotAfterUpload: true
@@ -282,25 +309,29 @@ spec:
   ttlSecondsAfterFinished: 86400
 status:
   phase: Pending
-  # Pending|Flushing|Quiescing|Snapshotting|Uploading|Unquiescing|Succeeded|Failed
+  # Pending|Scheduled|Quiescing|Snapshotting|Uploading|Succeeded|Failed
   lastBackupTime: ""
   lastSnapshotName: ""
   lastResticSnapshotID: ""
   lastJobName: ""
   lastDurationSeconds: 0
+  lastForceRun: ""                     # last consumed operator.backrest.io/force-run value
   conditions: []
 ```
+
+On-demand trigger while scheduled: annotate  
+`operator.backrest.io/force-run=<unique-token>`.
 
 #### Strategy semantics
 
 | Step | Behavior |
 |------|----------|
-| `liveFlush` | Run flush command/script; application keeps running |
-| `csiSnapshot` | Create generic CSI `VolumeSnapshot` → clone/mount RO → restic backup |
-| `topolvmSnapshot` | Same as CSI with TopoLVM thin snapshot class; pin Jobs to source node when required |
-| `quiescedLive` | Scale/stop dependent pods → mount source PVC → restic → unquiesce |
+| `quiescedLive` | Scale targets → mount source PVC(s) RO → restic → unquiesce |
+| `csiSnapshot` | VolumeSnapshot → wait ReadyToUse → clone PVC → restic (single PVC) |
+| `topolvmSnapshot` | Same as CSI with TopoLVM class; pin Job via `nodeSelector` when needed |
+| `liveFlush` | **Not implemented** |
 
-Combinations are expressed as an ordered `pipeline` (e.g. `liveFlush` → `csiSnapshot`, or `quiescedLive` alone).
+Combinations are an ordered `pipeline`. Empty pipeline defaults to `quiescedLive`.
 
 ### 3.5 `PVCRestore`
 
@@ -371,9 +402,10 @@ status:
 
 ### 4.3 Scheduling and retention
 
-- Prefer **Backrest** for plan cron, forget, prune, hooks, and bash scripts when the workload is a Backrest plan.
-- Prefer **operator CronJob / PVCBackup.schedule** when orchestration needs K8s snapshot/quiesce steps Backrest cannot perform alone.
-- `BackupRepository.spec.verify.enabled` defaults to `true` (scheduled `restic check`); set `false` to disable.
+- **`PVCBackup.spec.schedule`:** operator reconciles cron **in-process** (requeue until due). No per-backup CronJob or trigger ServiceAccount. Force with annotation `operator.backrest.io/force-run`.
+- **`BackupRepository.spec.verify`:** operator-owned CronJob runs `restic check` (deleted when verify disabled).
+- **`BackupPlan`:** not a runtime scheduler until Backrest plan sync lands; use `PVCBackup` for K8s quiesce/snapshot orchestration.
+- Retention: `PVCBackup.spec.retention.keepLast` → `restic forget --keep-last --prune` after backup.
 
 ### 4.4 Append-only
 
@@ -653,10 +685,10 @@ All documentation in English.
 
 | Phase | Scope |
 |-------|--------|
-| **P0** | CRDs, operator reconcile for BackrestCluster / BackupRepository / BackupPlan / PVCBackup / PVCRestore (existing+new PVC), CSI+TopoLVM+quiesce+flush pipeline, Helm skeleton, metrics endpoint, unit tests |
-| **P1** | MCP Deployment, TokenReview+impersonation+SAR, RBAC roles, destructive flag, validating webhooks |
-| **P2** | restore-proxy Job + curl/MCP download, embedded ServiceMonitor/VMServiceScrape/PrometheusRule/VMRule, Grafana dashboard, append-only + verify defaults |
-| **P3** | Full docs (incl. manual DR), operator state backup helpers, chart polish, latest-stable Backrest pin automation |
+| **P0** | CRDs; BackrestCluster (incl. Ingress); BackupRepository verify; PVCBackup quiesce/multi-PVC/schedule/CSI; Helm; metrics |
+| **P1** | MCP Deployment, TokenReview+impersonation+SAR, RBAC roles, validating webhooks |
+| **P2** | restore-proxy reliability (wait Job), ServiceMonitor/VM*/Grafana embeds, append-only enforcement |
+| **P3** | BackupPlan → Backrest sync; liveFlush; UI auth secret; full docs/DR polish; pairing probe |
 
 ---
 
@@ -670,7 +702,9 @@ Clone/fork Backrest only when implementation hits a hard gap (examples: non-UI m
 
 | Date | Gap | Workaround | Fork needed? |
 |------|-----|------------|--------------|
-| — | — | — | — |
+| 2026-07-24 | BackupPlan not applied to Backrest host | Use PVCBackup for real backups | No |
+| 2026-07-24 | liveFlush / deletePods / appendOnly / UI auth secret | Omit or document as unimplemented | No |
+| 2026-07-24 | Multihost pairing status | Status copies agentsReady (not a real pairing probe) | Maybe (Backrest API) |
 
 ---
 
@@ -709,3 +743,5 @@ backrest-operator/
 - Never log restic passwords or bearer tokens.
 - Keep examples free of private domains and vendor lock-in beyond documented optional drivers (TopoLVM, CSI).
 - Chart `home` / `sources` point at this GitHub repository (personal account) and upstream Backrest.
+- **UI Ingress belongs in `BackrestCluster.spec.host.ingress`.** oauth2-proxy may be a separate Deployment; point `backendServiceName` at it. Do not teach hand-rolled Ingress as the primary path.
+- **Do not invent new node label keys** for agents; use existing labels and matching tolerations.

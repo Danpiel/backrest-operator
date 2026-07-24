@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/robfig/cron/v3"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -25,10 +26,7 @@ import (
 	"github.com/Danpiel/backrest-operator/internal/metrics"
 )
 
-const (
-	annForceRun  = "operator.backrest.io/force-run"
-	kubectlImage = "bitnami/kubectl:1.32"
-)
+const annForceRun = "operator.backrest.io/force-run"
 
 var volumeSnapshotGVK = schema.GroupVersionKind{
 	Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot",
@@ -54,20 +52,28 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return r.fail(ctx, &backup, fmt.Errorf("pvcName or pvcNames required"))
 	}
 
+	// Drop kubectl-annotate CronJob scaffolding from older operator versions.
+	_ = r.cleanupLegacyScheduleResources(ctx, &backup)
+
+	// Resume watching an in-flight Job without re-quiescing.
+	if backup.Status.Phase == "Uploading" && backup.Status.LastJobName != "" {
+		return r.pollBackupJob(ctx, &backup)
+	}
+
 	if backup.Spec.Schedule != "" {
-		if err := r.ensureScheduleCron(ctx, &backup); err != nil {
+		due, wait, err := scheduleDue(&backup)
+		if err != nil {
 			return r.fail(ctx, &backup, err)
 		}
-		force := ""
-		if backup.Annotations != nil {
-			force = backup.Annotations[annForceRun]
-		}
-		if force == "" || force == backup.Status.LastForceRun {
-			if backup.Status.Phase == "" || backup.Status.Phase == "Failed" {
+		if !due {
+			if backup.Status.Phase != "Scheduled" {
 				backup.Status.Phase = "Scheduled"
 				_ = r.Status().Update(ctx, &backup)
 			}
-			return ctrl.Result{}, nil
+			if wait <= 0 {
+				wait = time.Minute
+			}
+			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 	} else if backup.Status.Phase == "Succeeded" {
 		return ctrl.Result{}, nil
@@ -83,7 +89,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	pipeline := backup.Spec.Strategy.Pipeline
 	if len(pipeline) == 0 {
-		pipeline = []string{"csiSnapshot"}
+		pipeline = []string{"quiescedLive"}
 	}
 
 	repoNS := backup.Spec.RepositoryRef.Namespace
@@ -116,10 +122,11 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	uploadPVCs := pvcs
 	var snapName string
+	primaryPVC := pvcs[0]
 	for _, step := range pipeline {
 		if step == "csiSnapshot" || step == "topolvmSnapshot" {
 			if len(pvcs) != 1 {
-				return r.fail(ctx, &backup, fmt.Errorf("csiSnapshot supports a single pvcName; use quiescedLive for multi-PVC"))
+				return r.fail(ctx, &backup, fmt.Errorf("csiSnapshot/topolvmSnapshot support a single PVC; use quiescedLive for multi-PVC"))
 			}
 			if backup.Spec.VolumeSnapshotClassName == "" {
 				return r.fail(ctx, &backup, fmt.Errorf("volumeSnapshotClassName required"))
@@ -127,14 +134,20 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			backup.Status.Phase = "Snapshotting"
 			_ = r.Status().Update(ctx, &backup)
 			snapName = fmt.Sprintf("%s-%d", backup.Name, started.Unix())
-			if err := r.createSnapshot(ctx, &backup, snapName); err != nil {
+			if err := r.createSnapshot(ctx, &backup, snapName, primaryPVC); err != nil {
+				return r.fail(ctx, &backup, err)
+			}
+			if err := r.waitSnapshotReady(ctx, backup.Namespace, snapName, 10*time.Minute); err != nil {
 				return r.fail(ctx, &backup, err)
 			}
 			clone := fmt.Sprintf("%s-clone-%d", backup.Name, started.Unix())
-			if err := r.cloneFromSnapshot(ctx, &backup, snapName, clone); err != nil {
+			if err := r.cloneFromSnapshot(ctx, &backup, snapName, clone, primaryPVC); err != nil {
 				return r.fail(ctx, &backup, err)
 			}
 			uploadPVCs = []string{clone}
+		}
+		if step == "liveFlush" {
+			logger.Info("liveFlush requested but not implemented yet; continuing pipeline")
 		}
 	}
 
@@ -147,43 +160,47 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVCs); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
-	var job batchv1.Job
-	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: backup.Namespace}, &job); err == nil {
-		if job.Status.Succeeded > 0 {
-			dur := time.Since(started).Seconds()
-			metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
-			metrics.BackupDuration.WithLabelValues(backup.Namespace, backup.Name).Observe(dur)
-			metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
-			if force := backup.Annotations[annForceRun]; force != "" {
-				backup.Status.LastForceRun = force
-			}
-			backup.Status.Phase = "Succeeded"
-			if backup.Spec.Schedule != "" {
-				backup.Status.Phase = "Scheduled"
-			}
-			backup.Status.LastBackupTime = time.Now().UTC().Format(time.RFC3339)
-			backup.Status.LastSnapshotName = snapName
-			backup.Status.LastJobName = jobName
-			backup.Status.LastDurationSeconds = int64(dur)
-			if snapName != "" {
-				del := true
-				if backup.Spec.Retention.DeleteVolumeSnapshotAfterUpload != nil {
-					del = *backup.Spec.Retention.DeleteVolumeSnapshotAfterUpload
-				}
-				if del {
-					_ = r.deleteSnapshot(ctx, backup.Namespace, snapName)
-				}
-			}
-			return ctrl.Result{}, r.Status().Update(ctx, &backup)
-		}
-		if job.Status.Failed > 0 {
-			metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "failure").Inc()
-			return r.fail(ctx, &backup, fmt.Errorf("restic job failed"))
-		}
-	}
-	logger.Info("waiting for restic job", "job", jobName)
 	backup.Status.LastJobName = jobName
 	_ = r.Status().Update(ctx, &backup)
+	return r.pollBackupJob(ctx, &backup)
+}
+
+func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operatorv1alpha1.PVCBackup) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	jobName := backup.Status.LastJobName
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: backup.Namespace}, &job); err != nil {
+		return r.fail(ctx, backup, fmt.Errorf("restic job %s: %w", jobName, err))
+	}
+	if job.Status.Succeeded > 0 {
+		if force := backup.Annotations[annForceRun]; force != "" {
+			backup.Status.LastForceRun = force
+		}
+		backup.Status.Phase = "Succeeded"
+		if backup.Spec.Schedule != "" {
+			backup.Status.Phase = "Scheduled"
+		}
+		backup.Status.LastBackupTime = time.Now().UTC().Format(time.RFC3339)
+		backup.Status.LastJobName = jobName
+		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
+		metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
+		if err := r.Status().Update(ctx, backup); err != nil {
+			return ctrl.Result{}, err
+		}
+		if backup.Spec.Schedule != "" {
+			_, wait, err := scheduleDue(backup)
+			if err == nil && wait > 0 {
+				return ctrl.Result{RequeueAfter: wait}, nil
+			}
+			return ctrl.Result{RequeueAfter: time.Hour}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+	if job.Status.Failed > 0 {
+		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "failure").Inc()
+		return r.fail(ctx, backup, fmt.Errorf("restic job failed"))
+	}
+	logger.Info("waiting for restic job", "job", jobName)
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
 }
 
@@ -197,123 +214,39 @@ func pvcList(b *operatorv1alpha1.PVCBackup) []string {
 	return nil
 }
 
-func (r *PVCBackupReconciler) ensureScheduleCron(ctx context.Context, b *operatorv1alpha1.PVCBackup) error {
-	saName := "pvcbackup-" + b.Name
-	if len(saName) > 63 {
-		saName = saName[:63]
+func scheduleDue(b *operatorv1alpha1.PVCBackup) (due bool, wait time.Duration, err error) {
+	if force := b.Annotations[annForceRun]; force != "" && force != b.Status.LastForceRun {
+		return true, 0, nil
 	}
-	cronName := saName
-	labels := map[string]string{
-		"app.kubernetes.io/name":       "backrest",
-		"app.kubernetes.io/component":  "pvcbackup-schedule",
-		"app.kubernetes.io/managed-by": "backrest-operator",
-		"operator.backrest.io/pvcbackup": b.Name,
-	}
-
-	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels}}
-	_ = controllerutil.SetControllerReference(b, sa, r.Scheme)
-	if err := r.createOrIgnore(ctx, sa); err != nil {
-		return err
-	}
-
-	role := &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels},
-		Rules: []rbacv1.PolicyRule{{
-			APIGroups:     []string{"operator.backrest.io"},
-			Resources:     []string{"pvcbackups"},
-			ResourceNames: []string{b.Name},
-			Verbs:         []string{"get", "patch", "update"},
-		}},
-	}
-	_ = controllerutil.SetControllerReference(b, role, r.Scheme)
-	if err := r.createOrUpdateRole(ctx, role); err != nil {
-		return err
-	}
-
-	rb := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: b.Namespace, Labels: labels},
-		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: saName},
-		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: saName, Namespace: b.Namespace}},
-	}
-	_ = controllerutil.SetControllerReference(b, rb, r.Scheme)
-	if err := r.createOrUpdateRoleBinding(ctx, rb); err != nil {
-		return err
-	}
-
-	enableLinks := false
-	script := fmt.Sprintf(
-		`kubectl -n %s annotate pvcbackup %s %s="$(date -u +%%Y%%m%%d%%H%%M%%S)" --overwrite`,
-		b.Namespace, b.Name, annForceRun,
-	)
-	cron := &batchv1.CronJob{
-		ObjectMeta: metav1.ObjectMeta{Name: cronName, Namespace: b.Namespace, Labels: labels},
-		Spec: batchv1.CronJobSpec{
-			Schedule:          b.Spec.Schedule,
-			ConcurrencyPolicy: batchv1.ForbidConcurrent,
-			JobTemplate: batchv1.JobTemplateSpec{
-				Spec: batchv1.JobSpec{
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							ServiceAccountName: saName,
-							RestartPolicy:      corev1.RestartPolicyOnFailure,
-							EnableServiceLinks: &enableLinks,
-							Containers: []corev1.Container{{
-								Name:    "trigger",
-								Image:   kubectlImage,
-								Command: []string{"/bin/bash", "-ec", script},
-							}},
-						},
-					},
-				},
-			},
-		},
-	}
-	_ = controllerutil.SetControllerReference(b, cron, r.Scheme)
-	var cur batchv1.CronJob
-	err := r.Get(ctx, client.ObjectKeyFromObject(cron), &cur)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, cron)
-	}
+	sched, err := cron.ParseStandard(b.Spec.Schedule)
 	if err != nil {
-		return err
+		return false, 0, fmt.Errorf("invalid schedule %q: %w", b.Spec.Schedule, err)
 	}
-	cur.Spec = cron.Spec
-	return r.Update(ctx, &cur)
+	from := b.CreationTimestamp.Time
+	if b.Status.LastBackupTime != "" {
+		if t, perr := time.Parse(time.RFC3339, b.Status.LastBackupTime); perr == nil {
+			from = t
+		}
+	}
+	next := sched.Next(from)
+	now := time.Now()
+	if now.Before(next) {
+		return false, next.Sub(now), nil
+	}
+	return true, 0, nil
 }
 
-func (r *PVCBackupReconciler) createOrIgnore(ctx context.Context, obj client.Object) error {
-	err := r.Create(ctx, obj)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
+func (r *PVCBackupReconciler) cleanupLegacyScheduleResources(ctx context.Context, b *operatorv1alpha1.PVCBackup) error {
+	name := "pvcbackup-" + b.Name
+	if len(name) > 63 {
+		name = name[:63]
 	}
-	return err
-}
-
-func (r *PVCBackupReconciler) createOrUpdateRole(ctx context.Context, desired *rbacv1.Role) error {
-	var cur rbacv1.Role
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-	cur.Rules = desired.Rules
-	return r.Update(ctx, &cur)
-}
-
-func (r *PVCBackupReconciler) createOrUpdateRoleBinding(ctx context.Context, desired *rbacv1.RoleBinding) error {
-	var cur rbacv1.RoleBinding
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), &cur)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-	cur.RoleRef = desired.RoleRef
-	cur.Subjects = desired.Subjects
-	return r.Update(ctx, &cur)
+	ns := b.Namespace
+	_ = client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}))
+	_ = client.IgnoreNotFound(r.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}))
+	_ = client.IgnoreNotFound(r.Delete(ctx, &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}))
+	_ = client.IgnoreNotFound(r.Delete(ctx, &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}))
+	return nil
 }
 
 func (r *PVCBackupReconciler) ensureRepoSecrets(ctx context.Context, b *operatorv1alpha1.PVCBackup, repo *operatorv1alpha1.BackupRepository) error {
@@ -321,7 +254,6 @@ func (r *PVCBackupReconciler) ensureRepoSecrets(ctx context.Context, b *operator
 	if repoNS == b.Namespace {
 		return nil
 	}
-	// Mirror password + env secrets into the PVC namespace so Jobs can mount them.
 	if err := r.mirrorSecret(ctx, repoNS, repo.Spec.PasswordSecretRef.Name, b.Namespace, repo.Spec.PasswordSecretRef.Name, b); err != nil {
 		return err
 	}
@@ -422,11 +354,11 @@ func (r *PVCBackupReconciler) scaleWorkload(ctx context.Context, kind, ns, name 
 		}
 		return int32(prev), r.Update(ctx, u)
 	default:
-		return 0, fmt.Errorf("unsupported quiesce kind %s", kind)
+		return 0, fmt.Errorf("unsupported quiesce kind %s (scaleToZero only; deletePods not implemented)", kind)
 	}
 }
 
-func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1alpha1.PVCBackup, snapName string) error {
+func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1alpha1.PVCBackup, snapName, pvcName string) error {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(volumeSnapshotGVK)
 	u.SetName(snapName)
@@ -434,7 +366,7 @@ func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1a
 	u.Object["spec"] = map[string]interface{}{
 		"volumeSnapshotClassName": b.Spec.VolumeSnapshotClassName,
 		"source": map[string]interface{}{
-			"persistentVolumeClaimName": b.Spec.PVCName,
+			"persistentVolumeClaimName": pvcName,
 		},
 	}
 	err := r.Create(ctx, u)
@@ -442,6 +374,27 @@ func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1a
 		return nil
 	}
 	return err
+}
+
+func (r *PVCBackupReconciler) waitSnapshotReady(ctx context.Context, ns, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(volumeSnapshotGVK)
+		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, u); err != nil {
+			return err
+		}
+		ready, found, _ := unstructured.NestedBool(u.Object, "status", "readyToUse")
+		if found && ready {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+	return fmt.Errorf("volume snapshot %s not ReadyToUse within %s", name, timeout)
 }
 
 func (r *PVCBackupReconciler) deleteSnapshot(ctx context.Context, ns, name string) error {
@@ -452,9 +405,9 @@ func (r *PVCBackupReconciler) deleteSnapshot(ctx context.Context, ns, name strin
 	return client.IgnoreNotFound(r.Delete(ctx, u))
 }
 
-func (r *PVCBackupReconciler) cloneFromSnapshot(ctx context.Context, b *operatorv1alpha1.PVCBackup, snapName, cloneName string) error {
+func (r *PVCBackupReconciler) cloneFromSnapshot(ctx context.Context, b *operatorv1alpha1.PVCBackup, snapName, cloneName, srcPVC string) error {
 	var src corev1.PersistentVolumeClaim
-	if err := r.Get(ctx, types.NamespacedName{Name: b.Spec.PVCName, Namespace: b.Namespace}, &src); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: srcPVC, Namespace: b.Namespace}, &src); err != nil {
 		return err
 	}
 	clone := src.DeepCopy()
@@ -604,6 +557,5 @@ func (r *PVCBackupReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&operatorv1alpha1.PVCBackup{}).
 		Owns(&batchv1.Job{}).
-		Owns(&batchv1.CronJob{}).
 		Complete(r)
 }

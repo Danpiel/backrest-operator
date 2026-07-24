@@ -65,13 +65,11 @@ kubectl get backuprepository -n backrest-system
 
 ### Append-only repositories
 
-Set `spec.appendOnly: true` to configure restic append-only mode. In append-only mode, forget/prune operations that rewrite history are rejected. Destructive MCP tools and deletes require admin RBAC and explicit flags.
+`spec.appendOnly: true` is accepted on the CR. **Enforcement on forget/prune Jobs and MCP is not wired yet** — treat as a declaration until P2.
 
 ### Scheduled `restic check` (verify)
 
-By default, `spec.verify.enabled` is `true`. The operator schedules a CronJob that runs `restic check` on the cadence in `spec.verify.schedule` (default: weekly).
-
-Disable verification when you manage checks externally:
+By default, `spec.verify.enabled` is `true`. The operator owns a CronJob that runs `restic check` on the cadence in `spec.verify.schedule` (default: weekly). Disabling verify deletes that CronJob.
 
 ```yaml
 spec:
@@ -81,22 +79,20 @@ spec:
 
 See [examples/backuprepository-s3.yaml](../examples/backuprepository-s3.yaml).
 
-## 3. Create a BackupPlan
+## 3. BackupPlan (stub)
 
-BackupPlans define scheduled paths, retention, hooks, and tags. The operator syncs plan fragments into the Backrest host ConfigMap.
+`BackupPlan` currently only writes fragments into `ConfigMap/backrest-plans`. The Backrest host does not mount them yet. **Use `PVCBackup` for real scheduled backups.**
 
 ```bash
 kubectl apply -f examples/backupplan.yaml
 kubectl get backupplan -n app
 ```
 
-An empty `spec.schedule` means on-demand backups only (via PVCBackup or MCP `trigger_backup`).
-
 See [examples/backupplan.yaml](../examples/backupplan.yaml).
 
 ## 4. Back up a PVC
 
-Create a `PVCBackup` CR to orchestrate flush, quiesce, snapshot, and restic upload steps.
+Create a `PVCBackup` CR. The operator owns Jobs and reconciles `spec.schedule` in-process (annotate `operator.backrest.io/force-run` for an immediate run). Do not hand-roll CronJobs or ServiceAccounts for this.
 
 ### CSI snapshot pipeline
 
