@@ -3,6 +3,8 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,10 +51,15 @@ func NewServer(cfg *rest.Config, onDeny func(tool string), requireAuth bool) (*S
 	}, nil
 }
 
-func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte) (resp []byte, httpStatus int) {
+func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte) (resp []byte, httpStatus int, method string) {
 	var req rpcRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		return rpcError(nil, -32700, "parse error"), http.StatusBadRequest
+		return rpcError(nil, -32700, "parse error"), http.StatusBadRequest, ""
+	}
+	method = req.Method
+	// JSON-RPC notifications have no id; Streamable HTTP expects HTTP 202 + empty body.
+	if strings.HasPrefix(req.Method, "notifications/") {
+		return nil, http.StatusAccepted, method
 	}
 	switch req.Method {
 	case "initialize":
@@ -60,9 +67,11 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
 			"serverInfo":      map[string]string{"name": "backrest-mcp", "version": "0.2.0"},
-		}), http.StatusOK
+		}), http.StatusOK, method
+	case "ping":
+		return rpcResult(req.ID, map[string]interface{}{}), http.StatusOK, method
 	case "tools/list":
-		return rpcResult(req.ID, map[string]interface{}{"tools": ToolSchemas()}), http.StatusOK
+		return rpcResult(req.ID, map[string]interface{}{"tools": ToolSchemas()}), http.StatusOK, method
 	case "tools/call":
 		var params callParams
 		_ = json.Unmarshal(req.Params, &params)
@@ -85,24 +94,24 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 		log := ctrl.LoggerFrom(ctx).WithName("mcp").WithValues("tool", params.Name, "namespace", ns, "user", userName)
 		if !s.Auth.AuthorizeTool(ctx, user, params.Name, ns, allow, params.Arguments) {
 			log.Info("tool denied")
-			return rpcError(req.ID, 403, fmt.Sprintf("forbidden: %s", params.Name)), http.StatusForbidden
+			return rpcError(req.ID, 403, fmt.Sprintf("forbidden: %s", params.Name)), http.StatusForbidden, method
 		}
 		log.Info("tool call")
 		result, err := s.Tools.Call(ctx, user, params.Name, params.Arguments)
 		if err != nil {
 			log.Error(err, "tool failed")
 			if strings.Contains(err.Error(), "allow_destructive") {
-				return rpcError(req.ID, 403, err.Error()), http.StatusForbidden
+				return rpcError(req.ID, 403, err.Error()), http.StatusForbidden, method
 			}
-			return rpcError(req.ID, 500, err.Error()), http.StatusInternalServerError
+			return rpcError(req.ID, 500, err.Error()), http.StatusInternalServerError, method
 		}
 		log.Info("tool ok")
 		text, _ := json.Marshal(result)
 		return rpcResult(req.ID, map[string]interface{}{
 			"content": []map[string]string{{"type": "text", "text": string(text)}},
-		}), http.StatusOK
+		}), http.StatusOK, method
 	default:
-		return rpcError(req.ID, -32601, "method not found"), http.StatusNotFound
+		return rpcError(req.ID, -32601, "method not found"), http.StatusNotFound, method
 	}
 }
 
@@ -128,8 +137,24 @@ func (s *Server) HTTPHandler() http.Handler {
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Match kubernetes-mcp-server: tell Cursor/Codex OAuth is not configured (not a generic 404).
+	oauthNotConfigured := func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Authorization URL is not configured", http.StatusNotFound)
+	}
+	mux.HandleFunc("/.well-known/oauth-authorization-server", oauthNotConfigured)
+	mux.HandleFunc("/.well-known/oauth-authorization-server/", oauthNotConfigured)
+	mux.HandleFunc("/.well-known/oauth-protected-resource", oauthNotConfigured)
+	mux.HandleFunc("/.well-known/oauth-protected-resource/", oauthNotConfigured)
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			// ok
+		case http.MethodGet, http.MethodDelete:
+			w.Header().Set("Allow", "POST")
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		default:
+			w.Header().Set("Allow", "POST")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
@@ -143,12 +168,37 @@ func (s *Server) HTTPHandler() http.Handler {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		resp, status := s.HandleRPC(r.Context(), user, body)
+		resp, status, method := s.HandleRPC(r.Context(), user, body)
+		if status == http.StatusAccepted {
+			w.WriteHeader(status)
+			return
+		}
+		if method == "initialize" && r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Mcp-Session-Id", newSessionID())
+		} else if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+			w.Header().Set("Mcp-Session-Id", sid)
+		}
+		accept := r.Header.Get("Accept")
+		if strings.Contains(accept, "text/event-stream") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache, no-transform")
+			w.WriteHeader(status)
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", resp)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write(resp)
 	})
 	return mux
+}
+
+func newSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return hex.EncodeToString([]byte(fmt.Sprintf("%d", os.Getpid())))
+	}
+	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
 func (s *Server) resolveHTTPUser(r *http.Request) (*UserIdentity, error) {
@@ -197,7 +247,10 @@ func (s *Server) RunStdio(ctx context.Context) error {
 		if line == "" {
 			continue
 		}
-		resp, _ := s.HandleRPC(ctx, user, []byte(line))
+		resp, status, _ := s.HandleRPC(ctx, user, []byte(line))
+		if status == http.StatusAccepted || len(resp) == 0 {
+			continue
+		}
 		_, _ = out.Write(resp)
 		_ = out.WriteByte('\n')
 		_ = out.Flush()
