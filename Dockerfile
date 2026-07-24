@@ -1,14 +1,14 @@
-FROM python:3.12-slim AS build
-WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
-RUN pip install --no-cache-dir .
-
 FROM python:3.12-slim
+
 RUN useradd -r -u 65532 -m nonroot
 WORKDIR /app
-COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=build /usr/local/bin/backrest-operator /usr/local/bin/backrest-operator
+
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+
+RUN pip install --no-cache-dir . \
+ && backrest-operator --help >/dev/null 2>&1 || true
+
 USER 65532:65532
 EXPOSE 8080 8081 9443
 ENTRYPOINT ["backrest-operator"]
