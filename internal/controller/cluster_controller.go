@@ -352,8 +352,18 @@ func (r *BackrestClusterReconciler) createOrUpdateDep(ctx context.Context, desir
 	if err != nil {
 		return err
 	}
-	cur.Spec = desired.Spec
-	cur.Labels = desired.Labels
+	// Deployment.spec.selector is immutable — keep existing selector/template labels in sync.
+	if cur.Spec.Selector != nil {
+		desired.Spec.Selector = cur.Spec.Selector
+		if cur.Spec.Selector.MatchLabels != nil {
+			desired.Spec.Template.Labels = cur.Spec.Selector.MatchLabels
+		}
+	}
+	cur.Spec.Replicas = desired.Spec.Replicas
+	cur.Spec.Template = desired.Spec.Template
+	if desired.Labels != nil {
+		cur.Labels = desired.Labels
+	}
 	return r.Update(ctx, &cur)
 }
 
@@ -366,8 +376,16 @@ func (r *BackrestClusterReconciler) createOrUpdateDS(ctx context.Context, desire
 	if err != nil {
 		return err
 	}
-	cur.Spec = desired.Spec
-	cur.Labels = desired.Labels
+	if cur.Spec.Selector != nil {
+		desired.Spec.Selector = cur.Spec.Selector
+		if cur.Spec.Selector.MatchLabels != nil {
+			desired.Spec.Template.Labels = cur.Spec.Selector.MatchLabels
+		}
+	}
+	cur.Spec.Template = desired.Spec.Template
+	if desired.Labels != nil {
+		cur.Labels = desired.Labels
+	}
 	return r.Update(ctx, &cur)
 }
 
