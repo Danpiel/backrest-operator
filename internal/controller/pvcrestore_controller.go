@@ -173,15 +173,32 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 	if snap == "" {
 		snap = "latest"
 	}
-	cmd := []string{"restic", "restore", snap, "--target", "/data"}
+	if err := r.ensureRestoreRepoSecrets(ctx, restore, &repo, repoNS); err != nil {
+		return err
+	}
+	cmd := []string{"sh", "-ec", "restic restore " + snap + " --target /data"}
 	for _, p := range restore.Spec.Restic.PathFilters {
-		cmd = append(cmd, "--include", p)
+		cmd[2] += " --include " + shellQuoteOne(p)
 	}
 	jobName := fmt.Sprintf("pvcrestore-%s-%d", restore.Name, time.Now().Unix())
 	if len(jobName) > 63 {
 		jobName = jobName[:63]
 	}
 	enableLinks := false
+	resticContainer := corev1.Container{
+		Name:    "restic",
+		Image:   resticImage,
+		Command: cmd,
+		Env:     resticEnv(&repo),
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: "data", MountPath: "/data",
+		}},
+	}
+	if repo.Spec.EnvFromSecretRef != nil && repo.Spec.EnvFromSecretRef.Name != "" {
+		resticContainer.EnvFrom = []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: repo.Spec.EnvFromSecretRef.Name},
+		}}}
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace},
 		Spec: batchv1.JobSpec{
@@ -189,15 +206,7 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
 					EnableServiceLinks: &enableLinks,
-					Containers: []corev1.Container{{
-						Name:    "restic",
-						Image:   resticImage,
-						Command: cmd,
-						Env:     resticEnv(&repo),
-						VolumeMounts: []corev1.VolumeMount{{
-							Name: "data", MountPath: "/data",
-						}},
-					}},
+					Containers:         []corev1.Container{resticContainer},
 					Volumes: []corev1.Volume{{
 						Name: "data",
 						VolumeSource: corev1.VolumeSource{
