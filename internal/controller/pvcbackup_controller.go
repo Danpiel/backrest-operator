@@ -84,8 +84,8 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			if backup.Status.Phase != "Scheduled" {
 				backup.Status.Phase = "Scheduled"
 				_ = r.Status().Update(ctx, &backup)
-				logger.Info("scheduled, waiting for next run", "schedule", backup.Spec.Schedule, "requeueAfter", wait.String())
 			}
+			logger.V(1).Info("waiting for next schedule", "schedule", backup.Spec.Schedule, "requeueAfter", wait.String())
 			repoNS := backup.Spec.RepositoryRef.Namespace
 			if repoNS == "" {
 				repoNS = backup.Namespace
@@ -93,7 +93,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			var repo operatorv1alpha1.BackupRepository
 			if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err == nil {
 				if err := syncPVCBackupPlanToHost(ctx, r.Client, &backup, &repo); err != nil {
-					logger.Error(err, "sync plan to Backrest host while waiting")
+					logger.V(1).Info("plan sync while waiting failed", "error", err.Error())
 				}
 			}
 			if wait <= 0 {
@@ -101,7 +101,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			}
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
-		logger.Info("schedule due, starting backup", "schedule", backup.Spec.Schedule)
+		logger.Info("starting scheduled backup", "schedule", backup.Spec.Schedule)
 	} else if backup.Status.Phase == "Succeeded" {
 		return ctrl.Result{}, nil
 	}
@@ -241,7 +241,7 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		backup.Status.LastJobName = jobName
 		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
 		metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
-		logger.Info("backup completed", "phase", backup.Status.Phase, "lastBackupTime", backup.Status.LastBackupTime)
+		logger.Info("backup completed", "lastBackupTime", backup.Status.LastBackupTime)
 
 		repoNS := backup.Spec.RepositoryRef.Namespace
 		if repoNS == "" {

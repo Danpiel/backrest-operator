@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Danpiel/backrest-operator/internal/logging"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 const defaultTimeout = 120 * time.Second
@@ -69,19 +72,25 @@ type Config struct {
 }
 
 func (c *Client) post(ctx context.Context, method string, body any, out any) error {
+	log := ctrl.LoggerFrom(ctx).WithName("backrest").WithValues("method", method)
 	var buf bytes.Buffer
 	if body == nil {
 		buf.WriteString("{}")
 	} else if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1.Backrest/"+method, &buf)
+	reqBytes := buf.Bytes()
+	log.V(1).Info("backrest request", "bytes", len(reqBytes), "body", logging.BodySummary(reqBytes, 240))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1.Backrest/"+method, bytes.NewReader(reqBytes))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	started := time.Now()
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		log.Error(err, "backrest call failed")
 		return err
 	}
 	defer resp.Body.Close()
@@ -89,9 +98,13 @@ func (c *Client) post(ctx context.Context, method string, body any, out any) err
 	if err != nil {
 		return err
 	}
+	elapsed := time.Since(started).Round(time.Millisecond)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("backrest %s: HTTP %d: %s", method, resp.StatusCode, strings.TrimSpace(string(data)))
+		// Keep error messages short — full body only at debug.
+		log.V(1).Info("backrest error response", "status", resp.StatusCode, "duration", elapsed, "body", logging.BodySummary(data, 240))
+		return fmt.Errorf("backrest %s: HTTP %d: %s", method, resp.StatusCode, logging.Truncate(string(data), 200))
 	}
+	log.V(1).Info("backrest ok", "status", resp.StatusCode, "duration", elapsed, "bytes", len(data), "body", logging.BodySummary(data, 240))
 	if out == nil || len(data) == 0 {
 		return nil
 	}

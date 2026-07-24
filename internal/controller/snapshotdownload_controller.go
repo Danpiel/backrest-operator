@@ -16,6 +16,7 @@ import (
 	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
 	"github.com/Danpiel/backrest-operator/internal/backrest"
 	"github.com/Danpiel/backrest-operator/internal/filters"
+	"github.com/Danpiel/backrest-operator/internal/logging"
 	"github.com/Danpiel/backrest-operator/internal/metrics"
 )
 
@@ -54,10 +55,11 @@ func (r *SnapshotDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	sd.Status.Phase = "Pending"
 	sd.Status.Message = "minting download URL"
 	_ = r.Status().Update(ctx, &sd)
+	logger.Info("minting download URL", "mode", sd.Spec.Mode, "snapshot", logging.Truncate(sd.Spec.SnapshotID, 12))
 
 	link, err := r.mint(ctx, &sd)
 	if err != nil {
-		logger.Error(err, "mint download URL failed")
+		logger.Error(err, "failed to mint download URL")
 		metrics.ReconcileErrors.WithLabelValues("SnapshotDownload").Inc()
 		sd.Status.Phase = "Failed"
 		sd.Status.Message = err.Error()
@@ -72,7 +74,6 @@ func (r *SnapshotDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	sd.Status.OperationID = link.OperationID
 	sd.Status.SnapshotID = sd.Spec.SnapshotID
 	sd.Status.Path = link.Path
-	sd.Status.Message = "signed Backrest download URL ready (restore visible in UI when mode=restore)"
 	if link.Mode == "restore" {
 		sd.Status.Message = "Backrest Restore completed; download URL ready (visible in UI)"
 	} else {
@@ -88,7 +89,13 @@ func (r *SnapshotDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err := r.Status().Update(ctx, &sd); err != nil {
 		return ctrl.Result{}, err
 	}
-	logger.Info("download URL ready", "url", link.DownloadURL, "expiresAt", sd.Status.ExpiresAt)
+	logger.Info("download URL ready",
+		"mode", link.Mode,
+		"operationID", link.OperationID,
+		"expiresAt", sd.Status.ExpiresAt,
+		"url", logging.RedactURL(link.DownloadURL),
+	)
+	logger.V(1).Info("download URL (full)", "url", link.DownloadURL)
 	if !link.ExpiresAt.IsZero() {
 		until := time.Until(link.ExpiresAt.Add(-2 * time.Minute))
 		if until < time.Minute {

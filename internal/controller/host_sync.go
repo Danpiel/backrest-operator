@@ -134,7 +134,7 @@ func syncRepositoryToHost(ctx context.Context, c client.Client, repo *operatorv1
 	if err := bc.IndexSnapshots(ctx, repo.Name); err != nil {
 		logger.Error(err, "index snapshots after repo sync (non-fatal)")
 	}
-	logger.Info("synced repository to Backrest host", "cluster", clusterNS+"/"+clusterName, "instance", instance, "repo", repo.Name)
+	logger.V(1).Info("synced repository to Backrest UI", "cluster", clusterNS+"/"+clusterName, "repo", repo.Name)
 	return nil
 }
 
@@ -172,7 +172,7 @@ func syncPlanToHost(ctx context.Context, c client.Client, plan *operatorv1alpha1
 	if err := bc.UpsertPlan(ctx, bp); err != nil {
 		return err
 	}
-	log.FromContext(ctx).Info("synced plan to Backrest host", "plan", bp.ID, "repo", repoID)
+	log.FromContext(ctx).V(1).Info("synced plan to Backrest UI", "plan", bp.ID, "repo", repoID)
 	return nil
 }
 
@@ -203,6 +203,6 @@ func syncPVCBackupPlanToHost(ctx context.Context, c client.Client, b *operatorv1
 	if err := bc.IndexSnapshots(ctx, repo.Name); err != nil {
 		log.FromContext(ctx).Error(err, "index snapshots after plan sync")
 	}
-	log.FromContext(ctx).Info("synced PVCBackup plan to Backrest host", "plan", plan.ID, "repo", repo.Name)
+	log.FromContext(ctx).V(1).Info("synced PVCBackup plan to Backrest UI", "plan", plan.ID, "repo", repo.Name)
 	return nil
 }

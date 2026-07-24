@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/Danpiel/backrest-operator/internal/logging"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -57,6 +59,14 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 		return rpcError(nil, -32700, "parse error"), http.StatusBadRequest, ""
 	}
 	method = req.Method
+	log := ctrl.LoggerFrom(ctx).WithName("mcp")
+	// Protocol chatter stays at debug — do not spam info on every Cursor poll.
+	switch {
+	case strings.HasPrefix(method, "notifications/"), method == "initialize", method == "ping", method == "tools/list":
+		log.V(1).Info("rpc", "method", method, "bytes", len(body))
+	default:
+		log.V(1).Info("rpc", "method", method, "bytes", len(body), "body", logging.BodySummary(body, 240))
+	}
 	// JSON-RPC notifications have no id; Streamable HTTP expects HTTP 202 + empty body.
 	if strings.HasPrefix(req.Method, "notifications/") {
 		return nil, http.StatusAccepted, method
@@ -91,28 +101,42 @@ func (s *Server) HandleRPC(ctx context.Context, user *UserIdentity, body []byte)
 		if user != nil {
 			userName = user.Username
 		}
-		log := ctrl.LoggerFrom(ctx).WithName("mcp").WithValues("tool", params.Name, "namespace", ns, "user", userName)
+		tlog := log.WithValues("tool", params.Name, "namespace", ns, "user", userName)
 		if !s.Auth.AuthorizeTool(ctx, user, params.Name, ns, allow, params.Arguments) {
-			log.Info("tool denied")
+			tlog.Info("tool denied")
 			return rpcError(req.ID, 403, fmt.Sprintf("forbidden: %s", params.Name)), http.StatusForbidden, method
 		}
-		log.Info("tool call")
+		tlog.V(1).Info("tool starting", "args", logging.BodySummary(mustJSON(params.Arguments), 240))
+		started := time.Now()
 		result, err := s.Tools.Call(ctx, user, params.Name, params.Arguments)
+		elapsed := time.Since(started).Round(time.Millisecond)
 		if err != nil {
-			log.Error(err, "tool failed")
+			tlog.Error(err, "tool failed", "duration", elapsed)
 			if strings.Contains(err.Error(), "allow_destructive") {
 				return rpcError(req.ID, 403, err.Error()), http.StatusForbidden, method
 			}
 			return rpcError(req.ID, 500, err.Error()), http.StatusInternalServerError, method
 		}
-		log.Info("tool ok")
 		text, _ := json.Marshal(result)
+		tlog.Info("tool completed", "duration", elapsed)
+		tlog.V(1).Info("tool result", "bytes", len(text), "body", logging.BodySummary(text, 240))
 		return rpcResult(req.ID, map[string]interface{}{
 			"content": []map[string]string{{"type": "text", "text": string(text)}},
 		}), http.StatusOK, method
 	default:
 		return rpcError(req.ID, -32601, "method not found"), http.StatusNotFound, method
 	}
+}
+
+func mustJSON(v interface{}) []byte {
+	if v == nil {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
 }
 
 func rpcResult(id interface{}, result interface{}) []byte {

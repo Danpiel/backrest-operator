@@ -60,11 +60,11 @@ func (r *BackupRepositoryReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		repo.Status.LastCheckResult = "skipped"
 		name := "restic-check-" + repo.Name
 		_ = client.IgnoreNotFound(r.Delete(ctx, &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: repo.Namespace}}))
-		logger.Info("verify disabled, CronJob removed if present")
+		logger.V(1).Info("verify disabled")
 	}
 	if err := syncRepositoryToHost(ctx, r.Client, &repo); err != nil {
 		metrics.ReconcileErrors.WithLabelValues("BackupRepository").Inc()
-		logger.Error(err, "sync repository to Backrest host failed")
+		logger.Error(err, "failed to sync repository to Backrest UI")
 		repo.Status.Phase = "Failed"
 		repo.Status.Conditions = []operatorv1alpha1.Condition{{Type: "SyncFailed", Status: "True", Message: err.Error()}}
 		_ = r.Status().Update(ctx, &repo)
