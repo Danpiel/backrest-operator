@@ -5,7 +5,6 @@ GO ?= go
 build:
 	$(GO) build -o bin/operator ./cmd/operator
 	$(GO) build -o bin/mcp ./cmd/mcp
-	$(GO) build -o bin/export-proxy ./cmd/export-proxy
 
 test:
 	$(GO) test ./...

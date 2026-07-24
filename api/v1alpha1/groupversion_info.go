@@ -24,6 +24,7 @@ func init() {
 		&BackupPlan{}, &BackupPlanList{},
 		&PVCBackup{}, &PVCBackupList{},
 		&PVCRestore{}, &PVCRestoreList{},
+		&SnapshotDownload{}, &SnapshotDownloadList{},
 	)
 }
 

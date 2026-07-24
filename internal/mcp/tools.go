@@ -22,8 +22,9 @@ var (
 	gvrCluster = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "backrestclusters"}
 	gvrRepo    = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "backuprepositories"}
 	gvrPlan    = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "backupplans"}
-	gvrBackup  = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "pvcbackups"}
-	gvrRestore = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "pvcrestores"}
+	gvrBackup           = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "pvcbackups"}
+	gvrRestore          = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "pvcrestores"}
+	gvrSnapshotDownload = schema.GroupVersionResource{Group: "operator.backrest.io", Version: "v1alpha1", Resource: "snapshotdownloads"}
 )
 
 type Tools struct {
@@ -152,8 +153,6 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 		return dc.Resource(gvrRestore).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
 	case "get_pvc_restore":
 		return dc.Resource(gvrRestore).Namespace(ns).Get(ctx, strArg(args, "name", ""), metav1.GetOptions{})
-	case "restore_export":
-		return t.restoreExport(ctx, dc, ns, args)
 	case "repo_status":
 		obj, err := dc.Resource(gvrRepo).Namespace(ns).Get(ctx, strArg(args, "name", ""), metav1.GetOptions{})
 		if err != nil {
@@ -174,6 +173,10 @@ func (t *Tools) Call(ctx context.Context, user *UserIdentity, name string, args 
 		return t.listSnapshots(ctx, dc, ns, args)
 	case "get_snapshot_download_url":
 		return t.getSnapshotDownloadURL(ctx, dc, ns, args)
+	case "create_snapshot_download":
+		return t.createSnapshotDownload(ctx, dc, ns, args)
+	case "get_snapshot_download":
+		return t.getSnapshotDownload(ctx, dc, ns, args)
 	case "get_host_config":
 		return t.getHostConfig(ctx, args)
 	case "index_repository":
@@ -240,62 +243,134 @@ func (t *Tools) getSnapshotDownloadURL(ctx context.Context, dc dynamic.Interface
 	if err != nil {
 		return nil, err
 	}
-	selector := map[string]any{"snapshotId": snapID}
-	if planID != "" {
-		selector["planId"] = planID
-	}
-	ops, err := bc.GetOperations(ctx, selector, 20)
+	link, err := bc.MintDownloadURL(ctx, repo, snapID, planID, path, publicBase)
 	if err != nil {
 		return nil, err
 	}
-	var opID int64
-	for _, op := range ops {
-		if _, ok := op["operationIndexSnapshot"]; !ok {
-			continue
-		}
-		opID = jsonNumberAsInt64(op["id"])
-		if opID > 0 {
-			break
-		}
+	out := map[string]interface{}{
+		"downloadURL": link.DownloadURL,
+		"relativeURL": link.RelativeURL,
+		"operationId": link.OperationID,
+		"snapshotId":  snapID,
+		"path":        link.Path,
+		"repository":  repo,
+		"contentType": "application/octet-stream (.tar stream via restic dump)",
+		"note":        "Signed JWT URL from Backrest GetDownloadURL. Prefer curl -L -o backup.tar <url>.",
 	}
-	if opID == 0 {
-		return nil, fmt.Errorf("no indexed snapshot operation for snapshot_id=%s (run index_repository first)", snapID)
+	if !link.ExpiresAt.IsZero() {
+		out["expiresAt"] = link.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	rel, err := bc.GetDownloadURL(ctx, opID, path)
-	if err != nil {
-		return nil, err
-	}
-	abs := backrest.AbsoluteDownloadURL(publicBase, rel)
-	return map[string]interface{}{
-		"downloadURL":  abs,
-		"relativeURL":  rel,
-		"operationId":  opID,
-		"snapshotId":   snapID,
-		"path":         path,
-		"repository":   repo,
-		"contentType":  "application/octet-stream (.tar stream via restic dump)",
-		"note":         "Signed JWT URL from Backrest GetDownloadURL; streams without an export Job. Prefer curl -L -o backup.tar <url>.",
-	}, nil
+	return out, nil
 }
 
-func jsonNumberAsInt64(v interface{}) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int64:
-		return n
-	case int:
-		return int64(n)
-	case json.Number:
-		i, _ := n.Int64()
-		return i
-	case string:
-		var i int64
-		_, _ = fmt.Sscan(n, &i)
-		return i
-	default:
-		return 0
+func (t *Tools) createSnapshotDownload(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	repo := strArg(args, "repository_name", strArg(args, "name", ""))
+	snapID := strArg(args, "snapshot_id", "")
+	if repo == "" || snapID == "" {
+		return nil, fmt.Errorf("repository_name and snapshot_id are required")
 	}
+	repoNS := strArg(args, "repository_namespace", ns)
+	path := strArg(args, "path", "/")
+	planID := strArg(args, "plan_id", "")
+	publicBase := strArg(args, "public_base_url", "")
+	waitSec := intArg(args, "wait_seconds", 60)
+	if waitSec < 5 {
+		waitSec = 5
+	}
+	name := strArg(args, "download_name", "")
+	meta := map[string]interface{}{"namespace": ns}
+	if name != "" {
+		meta["name"] = name
+	} else {
+		meta["generateName"] = "snapdl-"
+	}
+	spec := map[string]interface{}{
+		"repositoryRef": map[string]interface{}{"name": repo, "namespace": repoNS},
+		"snapshotID":    snapID,
+		"path":          path,
+	}
+	if planID != "" {
+		spec["planID"] = planID
+	}
+	if publicBase != "" {
+		spec["publicBaseURL"] = publicBase
+	}
+	obj := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "operator.backrest.io/v1alpha1",
+		"kind":       "SnapshotDownload",
+		"metadata":   meta,
+		"spec":       spec,
+	}}
+	created, err := dc.Resource(gvrSnapshotDownload).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
+	if err != nil {
+		return nil, err
+	}
+	crName := created.GetName()
+	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
+	var latest *unstructured.Unstructured
+	for {
+		latest, err = dc.Resource(gvrSnapshotDownload).Namespace(ns).Get(ctx, crName, metav1.GetOptions{})
+		if err != nil {
+			return nil, err
+		}
+		phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
+		url, _, _ := unstructured.NestedString(latest.Object, "status", "downloadURL")
+		if phase == "Ready" && url != "" {
+			break
+		}
+		if phase == "Failed" {
+			msg, _, _ := unstructured.NestedString(latest.Object, "status", "message")
+			return map[string]interface{}{
+				"name": crName, "namespace": ns, "phase": phase, "message": msg,
+			}, fmt.Errorf("SnapshotDownload %s/%s failed: %s", ns, crName, msg)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
+	url, _, _ := unstructured.NestedString(latest.Object, "status", "downloadURL")
+	expires, _, _ := unstructured.NestedString(latest.Object, "status", "expiresAt")
+	msg, _, _ := unstructured.NestedString(latest.Object, "status", "message")
+	out := map[string]interface{}{
+		"name": crName, "namespace": ns, "phase": phase,
+		"downloadURL": url, "expiresAt": expires, "message": msg,
+		"snapshotId": snapID, "repository": repo,
+		"note": "URL is also in .status.downloadURL (kubectl get snapdl -o wide / -o jsonpath={.status.downloadURL}).",
+	}
+	if url == "" {
+		return out, fmt.Errorf("SnapshotDownload %s/%s created but downloadURL not ready yet (phase=%s); retry get_snapshot_download", ns, crName, phase)
+	}
+	return out, nil
+}
+
+func (t *Tools) getSnapshotDownload(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
+	name := strArg(args, "name", "")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	obj, err := dc.Resource(gvrSnapshotDownload).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	status, _, _ := unstructured.NestedMap(obj.Object, "status")
+	return map[string]interface{}{
+		"name":        obj.GetName(),
+		"namespace":   obj.GetNamespace(),
+		"phase":       status["phase"],
+		"downloadURL": status["downloadURL"],
+		"expiresAt":   status["expiresAt"],
+		"relativeURL": status["relativeURL"],
+		"operationID": status["operationID"],
+		"message":     status["message"],
+		"snapshotID":  status["snapshotID"],
+		"path":        status["path"],
+	}, nil
 }
 
 func (t *Tools) getHostConfig(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -421,94 +496,6 @@ func stringSliceArg(args map[string]interface{}, key string) []string {
 		}
 	}
 	return out
-}
-
-func (t *Tools) restoreExport(ctx context.Context, dc dynamic.Interface, ns string, args map[string]interface{}) (interface{}, error) {
-	repoNS := strArg(args, "repository_namespace", ns)
-	snapshotID := strArg(args, "snapshot_id", "latest")
-	ttl := intArg(args, "ttl_seconds", 3600)
-	waitSec := intArg(args, "wait_seconds", 120)
-	if waitSec < 5 {
-		waitSec = 5
-	}
-	pathFilters := stringSliceArg(args, "path_filters")
-	obj := &unstructured.Unstructured{Object: map[string]interface{}{
-		"apiVersion": "operator.backrest.io/v1alpha1",
-		"kind":       "PVCRestore",
-		"metadata": map[string]interface{}{
-			"generateName": "export-",
-			"namespace":    ns,
-		},
-		"spec": map[string]interface{}{
-			"mode": "export",
-			"repositoryRef": map[string]interface{}{
-				"name":      strArg(args, "repository_name", ""),
-				"namespace": repoNS,
-			},
-			"restic": map[string]interface{}{
-				"snapshotID":  snapshotID,
-				"pathFilters": pathFilters,
-			},
-			"export": map[string]interface{}{
-				"enabled":    true,
-				"ttlSeconds": ttl,
-				"oneShot":    true,
-				"format":     "tar",
-			},
-		},
-	}}
-	created, err := dc.Resource(gvrRestore).Namespace(ns).Create(ctx, obj, metav1.CreateOptions{})
-	if err != nil {
-		return nil, err
-	}
-	name := created.GetName()
-	deadline := time.Now().Add(time.Duration(waitSec) * time.Second)
-	var latest *unstructured.Unstructured
-	for {
-		latest, err = dc.Resource(gvrRestore).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return nil, err
-		}
-		ext, _, _ := unstructured.NestedString(latest.Object, "status", "exportExternalURL")
-		inCluster, _, _ := unstructured.NestedString(latest.Object, "status", "exportURL")
-		phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
-		if ext != "" || inCluster != "" || phase == "Failed" || phase == "Succeeded" {
-			break
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
-	ext, _, _ := unstructured.NestedString(latest.Object, "status", "exportExternalURL")
-	inCluster, _, _ := unstructured.NestedString(latest.Object, "status", "exportURL")
-	expires, _, _ := unstructured.NestedString(latest.Object, "status", "exportExpiresAt")
-	phase, _, _ := unstructured.NestedString(latest.Object, "status", "phase")
-	job, _, _ := unstructured.NestedString(latest.Object, "status", "lastJobName")
-	download := ext
-	if download == "" {
-		download = inCluster
-	}
-	out := map[string]interface{}{
-		"name":              name,
-		"namespace":         ns,
-		"phase":             phase,
-		"downloadURL":       download,
-		"exportExternalURL": ext,
-		"exportURL":         inCluster,
-		"exportExpiresAt":   expires,
-		"lastJobName":       job,
-		"snapshotID":        snapshotID,
-		"note":              "Archive becomes downloadable after restic restore finishes (HTTP 200 on the URL; /readyz returns ok). Full chain snapshots can be tens of GB.",
-	}
-	if download == "" {
-		return out, fmt.Errorf("export created as %s/%s but no download URL yet (phase=%s); retry get_pvc_restore", ns, name, phase)
-	}
-	return out, nil
 }
 
 // IsNotFound reports whether err is a Kubernetes not-found error.

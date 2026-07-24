@@ -51,7 +51,8 @@ Generic manifests in [examples/](./examples/):
 - `backuprepository-s3.yaml` — S3 restic repository with scheduled verify
 - `backupplan.yaml` — Plan fragment stub (prefer PVCBackup until Backrest sync lands)
 - `pvcbackup-csi.yaml` / `pvcbackup-quiesced.yaml` / `pvcbackup-multi.yaml` — PVC backup strategies
-- `pvcrestore-existing.yaml` / `pvcrestore-export.yaml` — Restore modes
+- `pvcrestore-existing.yaml` — Restore to an existing PVC
+- `snapshotdownload.yaml` — Mint signed download URL into CR status
 - `auth-secret.yaml`, `externalsecret.yaml`, `rbac-binding.yaml`
 
 ## Development
@@ -69,7 +70,7 @@ make docker
 - CRDs for repositories, PVC backup/restore; BackupPlan stub until host sync
 - Backup modes: quiesced multi-PVC, CSI/TopoLVM snapshots (single PVC)
 - In-process `PVCBackup` schedules + repository `restic check` CronJobs
-- Restore to existing/new PVC and export Jobs (Job completion tracking improving)
+- Restore to existing/new PVC; snapshot download via Backrest GetDownloadURL
 - Separate MCP Deployment (HTTP + stdio) with TokenReview / SAR / impersonation
 - Prometheus & VictoriaMetrics scrapes, embedded alerts, Grafana dashboard
 - Validating webhooks (`pvcName` or `pvcNames`)

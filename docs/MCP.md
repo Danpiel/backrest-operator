@@ -134,11 +134,13 @@ Append-only repositories additionally block forget/delete operations unless the 
 | `delete_plan` | Delete a BackupPlan (**destructive**) |
 | `trigger_backup` | Create a PVCBackup (on-demand backup) |
 | `create_pvc_restore` | Create a PVCRestore |
-| `get_pvc_restore` | Get restore status (includes `exportURL`) |
-| `restore_export` | Create export-mode restore with curl URL |
+| `get_pvc_restore` | Get restore status |
+| `get_snapshot_download_url` | Signed Backrest URL (immediate) |
+| `create_snapshot_download` | Create SnapshotDownload CR; waits for `status.downloadURL` |
+| `get_snapshot_download` | Read SnapshotDownload status / URL |
 | `repo_status` | Repository phase, verify status, append-only flag |
 
-Tools declared in the spec but not yet exposed in v0.1 code (`update_repository`, `get_plan`, `list_snapshots`, etc.) may appear in future releases — check `TOOL_SCHEMAS` in the source for the current list.
+Tools declared in the spec but not yet exposed may appear in future releases — check `ToolSchemas()` in the source for the current list.
 
 ## Metrics
 

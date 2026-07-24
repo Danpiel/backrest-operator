@@ -74,7 +74,7 @@ func ValidateObject(kind string, raw []byte) (bool, string) {
 			return false, err.Error()
 		}
 		switch obj.Spec.Mode {
-		case "fromResticToNewPVC", "fromResticToExistingPVC", "export":
+		case "fromResticToNewPVC", "fromResticToExistingPVC":
 			if obj.Spec.RepositoryRef.Name == "" {
 				return false, "spec.repositoryRef.name is required"
 			}
@@ -82,15 +82,19 @@ func ValidateObject(kind string, raw []byte) (bool, string) {
 			if obj.Spec.VolumeSnapshotRef.Name == "" {
 				return false, "volumeSnapshotRef.name required"
 			}
+		case "export":
+			return false, "mode export is removed; use SnapshotDownload / MCP get_snapshot_download_url"
 		}
-		ttl := obj.Spec.Export.TTLSeconds
-		if obj.Spec.Mode == "export" || obj.Spec.Export.Enabled {
-			if ttl == 0 {
-				ttl = 3600
-			}
-			if ttl < 60 || ttl > 86400 {
-				return false, "export.ttlSeconds must be between 60 and 86400"
-			}
+	case "SnapshotDownload":
+		var obj operatorv1alpha1.SnapshotDownload
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return false, err.Error()
+		}
+		if obj.Spec.RepositoryRef.Name == "" {
+			return false, "spec.repositoryRef.name is required"
+		}
+		if strings.TrimSpace(obj.Spec.SnapshotID) == "" {
+			return false, "spec.snapshotID is required"
 		}
 	case "BackupPlan":
 		var obj operatorv1alpha1.BackupPlan

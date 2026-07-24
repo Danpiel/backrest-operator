@@ -36,6 +36,8 @@ var toolPermissions = map[string][3]string{
 	"trigger_backup":     {"update", "pvcbackups", "operator.backrest.io"},
 	"list_snapshots":             {"get", "backuprepositories", "operator.backrest.io"},
 	"get_snapshot_download_url":  {"get", "backuprepositories", "operator.backrest.io"},
+	"create_snapshot_download":   {"create", "snapshotdownloads", "operator.backrest.io"},
+	"get_snapshot_download":      {"get", "snapshotdownloads", "operator.backrest.io"},
 	"get_snapshot":               {"get", "backuprepositories", "operator.backrest.io"},
 	"delete_snapshot":            {"delete", "backuprepositories", "operator.backrest.io"},
 	"get_host_config":            {"get", "backrestclusters", "operator.backrest.io"},
@@ -44,7 +46,6 @@ var toolPermissions = map[string][3]string{
 	"get_pvc_backup":             {"get", "pvcbackups", "operator.backrest.io"},
 	"create_pvc_restore":         {"create", "pvcrestores", "operator.backrest.io"},
 	"get_pvc_restore":            {"get", "pvcrestores", "operator.backrest.io"},
-	"restore_export":             {"create", "pvcrestores", "operator.backrest.io"},
 	"repo_status":                {"get", "backuprepositories", "operator.backrest.io"},
 }
 

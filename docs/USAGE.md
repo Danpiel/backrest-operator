@@ -137,20 +137,40 @@ kubectl get pvcrestore -n app -w
 
 ### Download a snapshot as `.tar` (Backrest API — preferred)
 
-Backrest can stream a snapshot (or a path inside it) as a tar archive via its
-native **GetDownloadURL** API. No PVCRestore / export Job is required.
+Backrest streams a snapshot (or a path inside it) as a tar archive via
+**GetDownloadURL**. The signed JWT in the URL is the credential (download Ingress
+bypasses oauth2-proxy).
 
-When `BackrestCluster.spec.host.ingress` is enabled, the operator also creates a
-sibling Ingress `{host-ingress-name}-download` for path `/download` that points
-**directly** at the Backrest host Service (bypasses oauth2-proxy). The signed
-JWT in the URL is the credential.
+#### Option A — `SnapshotDownload` CR (URL in status)
+
+```bash
+kubectl apply -f examples/snapshotdownload.yaml
+kubectl get snapdl -n app -w
+# when Phase=Ready:
+kubectl get snapdl -n app download-app-data-latest -o jsonpath='{.status.downloadURL}{"\n"}'
+curl -L -o snapshot.tar "$(kubectl get snapdl -n app download-app-data-latest -o jsonpath='{.status.downloadURL}')"
+```
+
+Remint after expiry:
+
+```bash
+kubectl annotate snapdl -n app download-app-data-latest operator.backrest.io/refresh="$(date +%s)" --overwrite
+```
+
+#### Option B — MCP (immediate or via CR)
+
+- `get_snapshot_download_url` — mint immediately, returns `downloadURL`
+- `create_snapshot_download` — creates the CR and waits until `status.downloadURL` is Ready
+- `get_snapshot_download` — read CR status
+
+#### Option C — kubectl into host pod
 
 ```bash
 # 1) Find the indexed-snapshot operation for your restic snapshot id
-HOST_POD=$(kubectl get pod -n backrest-system -l app.kubernetes.io/component=host -o jsonpath='{.items[0].metadata.name}')
+HOST_POD=$(kubectl get pod -n backrest -l app.kubernetes.io/component=host -o jsonpath='{.items[0].metadata.name}')
 SNAP_ID='<full-restic-snapshot-id>'
 
-kubectl exec -n backrest-system "$HOST_POD" -- wget -qO- \
+kubectl exec -n backrest "$HOST_POD" -- wget -qO- \
   --post-data="{\"selector\":{\"snapshotId\":\"$SNAP_ID\"},\"lastN\":5}" \
   --header='Content-Type: application/json' \
   http://127.0.0.1:9898/v1.Backrest/GetOperations
@@ -158,7 +178,7 @@ kubectl exec -n backrest-system "$HOST_POD" -- wget -qO- \
 
 # 2) Mint a signed relative download URL (path "/" = whole snapshot as .tar)
 OP_ID=11
-kubectl exec -n backrest-system "$HOST_POD" -- wget -qO- \
+kubectl exec -n backrest "$HOST_POD" -- wget -qO- \
   --post-data="{\"opId\":$OP_ID,\"filePath\":\"/\"}" \
   --header='Content-Type: application/json' \
   http://127.0.0.1:9898/v1.Backrest/GetDownloadURL
@@ -179,18 +199,6 @@ spec:
       downloadBypass:
         enabled: false
 ```
-
-### Export archive via PVCRestore (fallback)
-
-Creates a short-lived restore-proxy Job with a TTL-bound download URL (heavier
-than native GetDownloadURL — prefer the section above):
-
-```bash
-kubectl apply -f examples/pvcrestore-export.yaml
-kubectl get pvcrestore export-restore -n app -o jsonpath='{.status.exportExternalURL}{.status.exportURL}'
-```
-
-Export TTL must be between 60 and 86400 seconds (`spec.export.ttlSeconds`).
 
 ## 6. RBAC for human users
 

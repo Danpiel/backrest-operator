@@ -9,7 +9,6 @@ type PVCRestoreSpec struct {
 	VolumeSnapshotRef ObjectReference   `json:"volumeSnapshotRef,omitempty"`
 	Target            RestoreTargetSpec `json:"target,omitempty"`
 	Quiesce           QuiesceSpec       `json:"quiesce,omitempty"`
-	Export            ExportSpec        `json:"export,omitempty"`
 }
 
 type ResticRestoreSpec struct {
@@ -18,8 +17,8 @@ type ResticRestoreSpec struct {
 }
 
 type RestoreTargetSpec struct {
-	ExistingPVCName string      `json:"existingPVCName,omitempty"`
-	NewPVC          NewPVCSpec  `json:"newPVC,omitempty"`
+	ExistingPVCName string     `json:"existingPVCName,omitempty"`
+	NewPVC          NewPVCSpec `json:"newPVC,omitempty"`
 }
 
 type NewPVCSpec struct {
@@ -29,20 +28,10 @@ type NewPVCSpec struct {
 	AccessModes      []string `json:"accessModes,omitempty"`
 }
 
-type ExportSpec struct {
-	Enabled    bool   `json:"enabled,omitempty"`
-	TTLSeconds int32  `json:"ttlSeconds,omitempty"`
-	OneShot    bool   `json:"oneShot,omitempty"`
-	Format     string `json:"format,omitempty"`
-}
-
 type PVCRestoreStatus struct {
-	Phase             string      `json:"phase,omitempty"`
-	ExportURL         string      `json:"exportURL,omitempty"`
-	ExportExternalURL string      `json:"exportExternalURL,omitempty"`
-	ExportExpiresAt   string      `json:"exportExpiresAt,omitempty"`
-	LastJobName       string      `json:"lastJobName,omitempty"`
-	Conditions        []Condition `json:"conditions,omitempty"`
+	Phase      string      `json:"phase,omitempty"`
+	LastJobName string      `json:"lastJobName,omitempty"`
+	Conditions []Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

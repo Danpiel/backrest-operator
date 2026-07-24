@@ -100,6 +100,10 @@ func main() {
 		setupLog.Error(err, "register controller", "name", "PVCRestore")
 		os.Exit(1)
 	}
+	if err := (&controller.SnapshotDownloadReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "register controller", "name", "SnapshotDownload")
+		os.Exit(1)
+	}
 	setupLog.Info("controllers registered")
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

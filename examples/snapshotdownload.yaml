@@ -1,0 +1,16 @@
+apiVersion: operator.backrest.io/v1alpha1
+kind: SnapshotDownload
+metadata:
+  name: download-app-data-latest
+  namespace: app
+spec:
+  repositoryRef:
+    name: primary
+    namespace: backrest-system
+  snapshotID: "<full-restic-snapshot-id>"
+  path: /   # whole snapshot as .tar; or /data/... for a subtree
+  # publicBaseURL: https://backup.prq-infra.net  # optional override
+# After reconcile:
+#   kubectl get snapdl -n app download-app-data-latest -o jsonpath='{.status.downloadURL}{"\n"}'
+# Refresh / remint:
+#   kubectl annotate snapdl -n app download-app-data-latest operator.backrest.io/refresh="$(date +%s)" --overwrite

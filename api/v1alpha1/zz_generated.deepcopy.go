@@ -222,5 +222,46 @@ func (in *PVCRestoreList) DeepCopyObject() runtime.Object {
 	return in.DeepCopy()
 }
 
+func (in *SnapshotDownload) DeepCopyInto(out *SnapshotDownload) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	jsonCopy(&out.Spec, &in.Spec)
+	jsonCopy(&out.Status, &in.Status)
+}
+func (in *SnapshotDownload) DeepCopy() *SnapshotDownload {
+	if in == nil {
+		return nil
+	}
+	out := new(SnapshotDownload)
+	in.DeepCopyInto(out)
+	return out
+}
+func (in *SnapshotDownload) DeepCopyObject() runtime.Object {
+	return in.DeepCopy()
+}
+func (in *SnapshotDownloadList) DeepCopyInto(out *SnapshotDownloadList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		out.Items = make([]SnapshotDownload, len(in.Items))
+		for i := range in.Items {
+			in.Items[i].DeepCopyInto(&out.Items[i])
+		}
+	}
+}
+func (in *SnapshotDownloadList) DeepCopy() *SnapshotDownloadList {
+	if in == nil {
+		return nil
+	}
+	out := new(SnapshotDownloadList)
+	in.DeepCopyInto(out)
+	return out
+}
+func (in *SnapshotDownloadList) DeepCopyObject() runtime.Object {
+	return in.DeepCopy()
+}
+
 // Ensure metav1 import used when compiling older toolchains.
 var _ = metav1.Time{}

@@ -65,6 +65,11 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// A newer force-run must not be swallowed by polling a previous Job.
 		if force := backup.Annotations[annForceRun]; force != "" && force != backup.Status.LastForceRun {
 			logger.Info("force-run requested while Uploading; starting a new run", "token", force, "previousJob", backup.Status.LastJobName)
+			// Claim the token immediately so concurrent reconciles cannot spawn a job storm.
+			backup.Status.LastForceRun = force
+			if err := r.Status().Update(ctx, &backup); err != nil {
+				return ctrl.Result{}, err
+			}
 		} else {
 			return r.pollBackupJob(ctx, &backup)
 		}
@@ -99,6 +104,14 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Info("schedule due, starting backup", "schedule", backup.Spec.Schedule)
 	} else if backup.Status.Phase == "Succeeded" {
 		return ctrl.Result{}, nil
+	}
+
+	// Claim force-run before quiesce/job create so requeues cannot start parallel runs.
+	if force := backup.Annotations[annForceRun]; force != "" && force != backup.Status.LastForceRun {
+		backup.Status.LastForceRun = force
+		if err := r.Status().Update(ctx, &backup); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	started := time.Now()

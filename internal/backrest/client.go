@@ -3,6 +3,7 @@ package backrest
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -251,6 +252,119 @@ func AbsoluteDownloadURL(publicBase, relative string) string {
 		return rel
 	}
 	return base + rel
+}
+
+// DownloadLink is a minted Backrest GetDownloadURL result.
+type DownloadLink struct {
+	DownloadURL string
+	RelativeURL string
+	OperationID int64
+	Path        string
+	ExpiresAt   time.Time
+}
+
+// MintDownloadURL finds an indexed snapshot operation and returns a signed download URL.
+func (c *Client) MintDownloadURL(ctx context.Context, repoID, snapshotID, planID, path, publicBase string) (*DownloadLink, error) {
+	if snapshotID == "" {
+		return nil, fmt.Errorf("snapshotID is required")
+	}
+	if path == "" {
+		path = "/"
+	}
+	selector := map[string]any{"snapshotId": snapshotID}
+	if planID != "" {
+		selector["planId"] = planID
+	}
+	if repoID != "" {
+		selector["repoId"] = repoID
+	}
+	ops, err := c.GetOperations(ctx, selector, 20)
+	if err != nil {
+		return nil, err
+	}
+	var opID int64
+	for _, op := range ops {
+		if _, ok := op["operationIndexSnapshot"]; !ok {
+			continue
+		}
+		opID = jsonNumberAsInt64(op["id"])
+		if opID > 0 {
+			break
+		}
+	}
+	if opID == 0 {
+		return nil, fmt.Errorf("no indexed snapshot operation for snapshot_id=%s (run index_repository first)", snapshotID)
+	}
+	rel, err := c.GetDownloadURL(ctx, opID, path)
+	if err != nil {
+		return nil, err
+	}
+	link := &DownloadLink{
+		DownloadURL: AbsoluteDownloadURL(publicBase, rel),
+		RelativeURL: rel,
+		OperationID: opID,
+		Path:        path,
+	}
+	if exp, ok := ExpiryFromDownloadRelativeURL(rel); ok {
+		link.ExpiresAt = exp
+	}
+	return link, nil
+}
+
+// ExpiryFromDownloadRelativeURL parses JWT exp from ./download/<jwt>/ when present.
+func ExpiryFromDownloadRelativeURL(relative string) (time.Time, bool) {
+	rel := strings.Trim(strings.TrimSpace(relative), "/")
+	rel = strings.TrimPrefix(rel, "./")
+	parts := strings.Split(rel, "/")
+	var jwt string
+	for _, p := range parts {
+		if strings.Count(p, ".") == 2 && len(p) > 20 {
+			jwt = p
+			break
+		}
+	}
+	if jwt == "" {
+		return time.Time{}, false
+	}
+	segs := strings.Split(jwt, ".")
+	if len(segs) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := decodeJWTSegment(segs[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0).UTC(), true
+}
+
+func decodeJWTSegment(seg string) ([]byte, error) {
+	return base64.RawURLEncoding.DecodeString(seg)
+}
+
+func jsonNumberAsInt64(v interface{}) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	case string:
+		var i int64
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	default:
+		return 0
+	}
 }
 
 func (c *Client) ClearRepoHistory(ctx context.Context, repoID string) error {

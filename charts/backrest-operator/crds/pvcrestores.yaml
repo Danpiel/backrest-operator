@@ -41,7 +41,6 @@ spec:
                     - fromVolumeSnapshot
                     - fromResticToNewPVC
                     - fromResticToExistingPVC
-                    - export
                 repositoryRef:
                   type: object
                   properties:
@@ -124,28 +123,6 @@ spec:
                         required:
                           - kind
                           - name
-                export:
-                  type: object
-                  description: Export settings when mode is export.
-                  properties:
-                    enabled:
-                      type: boolean
-                      default: false
-                    ttlSeconds:
-                      type: integer
-                      format: int32
-                      minimum: 1
-                      default: 3600
-                    oneShot:
-                      type: boolean
-                      description: Invalidate URL after first successful download.
-                      default: true
-                    format:
-                      type: string
-                      enum:
-                        - tar
-                        - restic-dump
-                      default: tar
             status:
               type: object
               properties:
@@ -155,18 +132,8 @@ spec:
                     - Pending
                     - Quiescing
                     - Restoring
-                    - Exporting
                     - Succeeded
                     - Failed
-                exportURL:
-                  type: string
-                  description: In-cluster URL for curl download (ClusterIP + token path).
-                exportExternalURL:
-                  type: string
-                  description: Public HTTPS download URL when EXPORT_PUBLIC_BASE_URL is configured.
-                exportExpiresAt:
-                  type: string
-                  format: date-time
                 lastJobName:
                   type: string
                 conditions:
@@ -183,10 +150,6 @@ spec:
         - name: Mode
           type: string
           jsonPath: .spec.mode
-        - name: Export URL
-          type: string
-          jsonPath: .status.exportURL
-          priority: 1
         - name: Job
           type: string
           jsonPath: .status.lastJobName

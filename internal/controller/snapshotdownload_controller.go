@@ -1,0 +1,130 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
+	"github.com/Danpiel/backrest-operator/internal/backrest"
+	"github.com/Danpiel/backrest-operator/internal/filters"
+	"github.com/Danpiel/backrest-operator/internal/metrics"
+)
+
+const annRefreshDownload = "operator.backrest.io/refresh"
+
+type SnapshotDownloadReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+func (r *SnapshotDownloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("snapshotdownload", req.NamespacedName)
+	var sd operatorv1alpha1.SnapshotDownload
+	if err := r.Get(ctx, req.NamespacedName, &sd); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !filters.ObjectAllowed(sd.Namespace, sd.Labels) {
+		logger.V(1).Info("skipped by watch filter")
+		return ctrl.Result{}, nil
+	}
+
+	refresh := ""
+	if sd.Annotations != nil {
+		refresh = sd.Annotations[annRefreshDownload]
+	}
+	if sd.Status.Phase == "Ready" && sd.Status.DownloadURL != "" && refresh == sd.Status.LastRefresh {
+		if sd.Status.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, sd.Status.ExpiresAt); err == nil && time.Now().Before(t.Add(-2*time.Minute)) {
+				return ctrl.Result{RequeueAfter: time.Until(t.Add(-2 * time.Minute))}, nil
+			}
+		} else {
+			return ctrl.Result{}, nil
+		}
+	}
+
+	sd.Status.Phase = "Pending"
+	sd.Status.Message = "minting download URL"
+	_ = r.Status().Update(ctx, &sd)
+
+	link, err := r.mint(ctx, &sd)
+	if err != nil {
+		logger.Error(err, "mint download URL failed")
+		metrics.ReconcileErrors.WithLabelValues("SnapshotDownload").Inc()
+		sd.Status.Phase = "Failed"
+		sd.Status.Message = err.Error()
+		sd.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Ready", Status: "False", Message: err.Error()}}
+		_ = r.Status().Update(ctx, &sd)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	sd.Status.Phase = "Ready"
+	sd.Status.DownloadURL = link.DownloadURL
+	sd.Status.RelativeURL = link.RelativeURL
+	sd.Status.OperationID = link.OperationID
+	sd.Status.SnapshotID = sd.Spec.SnapshotID
+	sd.Status.Path = link.Path
+	sd.Status.Message = "signed Backrest GetDownloadURL ready"
+	sd.Status.LastRefresh = refresh
+	sd.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Ready", Status: "True", Message: "URL ready"}}
+	if !link.ExpiresAt.IsZero() {
+		sd.Status.ExpiresAt = link.ExpiresAt.UTC().Format(time.RFC3339)
+	} else {
+		sd.Status.ExpiresAt = ""
+	}
+	if err := r.Status().Update(ctx, &sd); err != nil {
+		return ctrl.Result{}, err
+	}
+	logger.Info("download URL ready", "url", link.DownloadURL, "expiresAt", sd.Status.ExpiresAt)
+	if !link.ExpiresAt.IsZero() {
+		until := time.Until(link.ExpiresAt.Add(-2 * time.Minute))
+		if until < time.Minute {
+			until = time.Minute
+		}
+		return ctrl.Result{RequeueAfter: until}, nil
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *SnapshotDownloadReconciler) mint(ctx context.Context, sd *operatorv1alpha1.SnapshotDownload) (*backrest.DownloadLink, error) {
+	repoNS := sd.Spec.RepositoryRef.Namespace
+	if repoNS == "" {
+		repoNS = sd.Namespace
+	}
+	var repo operatorv1alpha1.BackupRepository
+	if err := r.Get(ctx, types.NamespacedName{Name: sd.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("BackupRepository %s/%s not found", repoNS, sd.Spec.RepositoryRef.Name)
+		}
+		return nil, err
+	}
+	clusterNS, clusterName := resolveClusterRef(repo.Spec.Backrest.ClusterRef, repo.Namespace)
+	bc := hostClientForCluster(clusterNS, clusterName)
+
+	publicBase := sd.Spec.PublicBaseURL
+	if publicBase == "" {
+		publicBase = os.Getenv("BACKREST_PUBLIC_BASE_URL")
+	}
+	if publicBase == "" {
+		publicBase = "https://backup.prq-infra.net"
+	}
+	path := sd.Spec.Path
+	if path == "" {
+		path = "/"
+	}
+	return bc.MintDownloadURL(ctx, repo.Name, sd.Spec.SnapshotID, sd.Spec.PlanID, path, publicBase)
+}
+
+func (r *SnapshotDownloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&operatorv1alpha1.SnapshotDownload{}).
+		Complete(r)
+}

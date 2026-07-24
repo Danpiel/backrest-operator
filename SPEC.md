@@ -30,7 +30,7 @@ Users declare **Custom Resources only**. The operator owns derived objects (Depl
 | `BackupRepository.backrest.syncToHost` | **Not wired** |
 | `appendOnly` enforcement | **Field only** (not enforced on Jobs/MCP yet) |
 | UI `auth.existingSecret` | **Field only** |
-| `PVCRestore` existing/new/export | **Partial** (Jobs created; success may be reported before Job completes) |
+| `PVCRestore` existing/new | **Partial** (Jobs created; success may be reported before Job completes) |
 | Validating webhooks | **Implemented** (pvcName \| pvcNames) |
 | MCP TokenReview / SAR / impersonation | **Implemented** (tool catalog subset of §6.6) |
 | Monitoring embeds (ServiceMonitor / VM* / Grafana) | **Implemented** (chart toggles) |
@@ -45,7 +45,7 @@ Users declare **Custom Resources only**. The operator owns derived objects (Depl
 | G2 | Agent-operable MCP | Separate MCP Deployment lets AI agents create/delete/trigger plans and manage backups under Kubernetes RBAC |
 | G3 | Flexible backup modes | Live flush, quiesced file copy, CSI/TopoLVM snapshots, and ordered combinations |
 | G4 | Backrest feature parity | Cron, on-demand, retention/forget, prune, hooks/bash scripts — everything Backrest already does |
-| G5 | Restore paths | Existing PVC, new PVC, partial paths, local download via MCP+Job, curl via self-hosted restore-proxy Job |
+| G5 | Restore paths | Existing PVC, new PVC, partial paths, local download via Backrest GetDownloadURL |
 | G6 | Observability | Prometheus + VictoriaMetrics scrapes, embedded alert rules, Grafana dashboard |
 | G7 | Opensource-ready | Generic Helm charts, docs, Docker build, unit tests; no private infra coupling |
 | G8 | Operator DR | Backup of operator/Backrest state + manual runbooks when the operator is unavailable |
@@ -91,7 +91,7 @@ Users declare **Custom Resources only**. The operator owns derived objects (Depl
                          └───────┬────────┘
               ┌──────────────────┼──────────────────┐
               ▼                  ▼                  ▼
-     VolumeSnapshot      restic Jobs         restore-proxy Job
+     VolumeSnapshot      restic Jobs         GetDownloadURL (/download)
      + quiesce/flush     → any restic        (TTL HTTP / curl)
                          backend
 ```
@@ -100,10 +100,10 @@ Users declare **Custom Resources only**. The operator owns derived objects (Depl
 
 | Component | Role |
 |-----------|------|
-| **backrest-operator** | Reconciles CRs; deploys Backrest host + agents; runs snapshot/quiesce/restic/export Jobs; serves `/metrics`; registers validating webhooks |
+| **backrest-operator** | Reconciles CRs; deploys Backrest host + agents; runs snapshot/quiesce/restic Jobs; serves `/metrics`; registers validating webhooks |
 | **backrest-mcp** | Separate Deployment (process isolation). MCP tools over Streamable HTTP/SSE and stdio. Does not share the operator process |
 | **Backrest host + agents** | Upstream Backrest in server–agent (multihost) mode; Web UI via Service/Ingress; optional UI auth |
-| **restore-proxy Job** | Self-contained short-lived HTTP server streaming a restic dump/archive — no S3 pre-signed URLs or external CDN |
+| **GetDownloadURL** | Native Backrest signed URL streaming a snapshot path as `.tar` via host `/download` Ingress |
 
 ### Watch model
 
@@ -343,7 +343,7 @@ metadata:
   namespace: app
 spec:
   mode: fromResticToExistingPVC
-  # fromVolumeSnapshot | fromResticToNewPVC | fromResticToExistingPVC | export
+  # fromVolumeSnapshot | fromResticToNewPVC | fromResticToExistingPVC
   repositoryRef:
     name: primary
     namespace: backrest-system
@@ -364,15 +364,8 @@ spec:
     enabled: true
     timeoutSeconds: 900
     targets: []
-  export:                              # mode=export
-    enabled: false
-    ttlSeconds: 3600
-    oneShot: true                      # invalidate URL after first successful download
-    format: tar                        # tar | restic-dump stream
 status:
   phase: Pending
-  exportURL: ""                        # in-cluster URL for curl (ClusterIP + token path)
-  exportExpiresAt: ""
   lastJobName: ""
   conditions: []
 ```
@@ -426,26 +419,11 @@ When `BackupRepository.spec.appendOnly: true`, the operator/Backrest configure t
 - From VolumeSnapshot: PVC with `dataSource` = snapshot.
 - From restic: create empty PVC → Job mounts → `restic restore`.
 
-### 5.3 Local machine (MCP + Job)
+### 5.3 Snapshot download (Backrest GetDownloadURL)
 
-1. MCP tool `restore_export` (requires operator-level RBAC) creates a `PVCRestore` with `mode: export` or a dedicated export Job.
-2. Job runs `restic dump` / tar archive of selected paths.
-3. Client downloads via:
-   - MCP streaming tool response, and/or
-   - instructions to fetch the Job’s export endpoint (port-forward or in-cluster URL).
-
-### 5.4 curl link (self-contained restore-proxy)
-
-Design priority: **stable and independent of external components** (no object-store pre-signed URLs, no CDN).
-
-1. Operator creates a short-lived Job+Service that:
-   - authenticates with a high-entropy token in the URL path or query;
-   - streams the archive over HTTP;
-   - enforces TTL and optional one-shot download;
-   - exits and deletes itself after expiry.
-2. Status publishes an in-cluster URL, e.g. `http://restore-<name>.<ns>.svc/<token>/archive.tar`.
-3. Users run `kubectl port-forward` or expose via optional Ingress (documented; default ClusterIP only).
-4. Example: `curl -fL -o backup.tar "http://127.0.0.1:8080/<token>/archive.tar"`.
+1. Index the repository so Backrest has an `operationIndexSnapshot` for the restic snapshot id.
+2. Call Backrest `GetDownloadURL` (MCP `get_snapshot_download_url`) with `opId` + path (`/` = whole snapshot as `.tar`).
+3. Download via the host download Ingress: `https://<ui-host>/download/<jwt>/` (bypasses oauth2-proxy; JWT is the credential).
 
 ---
 
@@ -483,7 +461,7 @@ Per-user identity — do **not** execute tools solely as the MCP pod SA.
 | ClusterRole | Capabilities |
 |-------------|--------------|
 | `backrest-viewer` | get/list/watch CRs; read backup metadata/status |
-| `backrest-operator` | create/update plans & backups; trigger backups; restores/exports |
+| `backrest-operator` | create/update plans & backups; trigger backups; restores |
 | `backrest-admin` | delete; destructive flags; repository secret refs; append-only overrides |
 
 ### 6.5 Destructive operations
@@ -512,7 +490,7 @@ Default is `false`. Webhooks and MCP both enforce this.
 | `delete_snapshot` | forget/delete | requires `allow_destructive`; blocked if appendOnly |
 | `create_pvc_backup` / `get_pvc_backup` | PVCBackup CRUD | |
 | `create_pvc_restore` / `get_pvc_restore` | PVCRestore CRUD | pathFilters supported |
-| `restore_export` | create export restore | returns curl URL +/or streams via MCP |
+| `get_snapshot_download_url` | signed Backrest download URL for a snapshot path |
 | `repo_status` | get + metrics summary | storage usage when available |
 
 ---
@@ -529,7 +507,6 @@ Admission webhooks validate CRs and provide guardrails for AI/MCP-generated obje
 - Destructive deletes without `allow_destructive` equivalent annotation on the CR (when created via MCP)
 - Append-only repo with prune/forget policies that contradict append-only
 - Cross-namespace refs outside operator watch filters (when filters enabled)
-- Export TTL outside allowed bounds
 
 Webhook TLS: cert-manager (preferred) or operator-managed certificates.
 
@@ -642,7 +619,6 @@ monitoring:
 - MCP SA: authz APIs + impersonation only.
 - Repository credentials always in Secrets; document ExternalSecrets/Vault as optional.
 - Append-only repos fail closed on delete/forget.
-- Export URLs: random tokens, TTL, optional one-shot; ClusterIP by default.
 
 ---
 
@@ -687,7 +663,7 @@ All documentation in English.
 |-------|--------|
 | **P0** | CRDs; BackrestCluster (incl. Ingress); BackupRepository verify; PVCBackup quiesce/multi-PVC/schedule/CSI; Helm; metrics |
 | **P1** | MCP Deployment, TokenReview+impersonation+SAR, RBAC roles, validating webhooks |
-| **P2** | restore-proxy reliability (wait Job), ServiceMonitor/VM*/Grafana embeds, append-only enforcement |
+| **P2** | ServiceMonitor/VM*/Grafana embeds, append-only enforcement |
 | **P3** | BackupPlan → Backrest sync; liveFlush; UI auth secret; full docs/DR polish; pairing probe |
 
 ---

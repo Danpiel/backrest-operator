@@ -50,6 +50,7 @@ rules:
       - backupplans
       - pvcbackups
       - pvcrestores
+      - snapshotdownloads
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["operator.backrest.io"]
     resources:
@@ -58,11 +59,13 @@ rules:
       - backupplans/status
       - pvcbackups/status
       - pvcrestores/status
+      - snapshotdownloads/status
       - backrestclusters/finalizers
       - backuprepositories/finalizers
       - backupplans/finalizers
       - pvcbackups/finalizers
       - pvcrestores/finalizers
+      - snapshotdownloads/finalizers
     verbs: ["get", "update", "patch"]
   # Read-only access to PVCs and namespaces for reconciliation
   - apiGroups: [""]
@@ -100,6 +103,7 @@ rules:
       - backupplans
       - pvcbackups
       - pvcrestores
+      - snapshotdownloads
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["operator.backrest.io"]
     resources:
@@ -108,6 +112,7 @@ rules:
       - backupplans/status
       - pvcbackups/status
       - pvcrestores/status
+      - snapshotdownloads/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -129,6 +134,7 @@ rules:
       - backupplans
       - pvcbackups
       - pvcrestores
+      - snapshotdownloads
     verbs: ["get", "list", "watch"]
   - apiGroups: ["operator.backrest.io"]
     resources:
@@ -137,6 +143,7 @@ rules:
       - backupplans/status
       - pvcbackups/status
       - pvcrestores/status
+      - snapshotdownloads/status
     verbs: ["get"]
 {{- end }}
 {{- if .Values.rbac.userRoles.operator.create }}
@@ -156,6 +163,7 @@ rules:
       - backupplans
       - pvcbackups
       - pvcrestores
+      - snapshotdownloads
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: ["operator.backrest.io"]
     resources:
@@ -164,6 +172,7 @@ rules:
       - backupplans/status
       - pvcbackups/status
       - pvcrestores/status
+      - snapshotdownloads/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
@@ -186,6 +195,7 @@ rules:
       - backupplans
       - pvcbackups
       - pvcrestores
+      - snapshotdownloads
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["operator.backrest.io"]
     resources:
@@ -194,6 +204,7 @@ rules:
       - backupplans/status
       - pvcbackups/status
       - pvcrestores/status
+      - snapshotdownloads/status
     verbs: ["get", "update", "patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]

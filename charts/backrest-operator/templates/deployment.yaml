@@ -48,29 +48,9 @@ spec:
               value: {{ include "backrest-operator.backrestImage" . | quote }}
             - name: OPERATOR_IMAGE
               value: {{ include "backrest-operator.operatorImage" . | quote }}
-            - name: EXPORT_PROXY_IMAGE
-              value: {{ include "backrest-operator.operatorImage" . | quote }}
-            {{- with .Values.operator.export }}
-            {{- if .publicBaseURL }}
-            - name: EXPORT_PUBLIC_BASE_URL
-              value: {{ .publicBaseURL | quote }}
-            {{- end }}
-            {{- if .ingressHost }}
-            - name: EXPORT_INGRESS_HOST
-              value: {{ .ingressHost | quote }}
-            {{- end }}
-            {{- if .ingressClassName }}
-            - name: EXPORT_INGRESS_CLASS
-              value: {{ .ingressClassName | quote }}
-            {{- end }}
-            {{- if .tlsSecretName }}
-            - name: EXPORT_INGRESS_TLS_SECRET
-              value: {{ .tlsSecretName | quote }}
-            {{- end }}
-            {{- if .ingressAnnotations }}
-            - name: EXPORT_INGRESS_ANNOTATIONS_JSON
-              value: {{ .ingressAnnotations | toJson | quote }}
-            {{- end }}
+            {{- if .Values.mcp.publicBaseURL }}
+            - name: BACKREST_PUBLIC_BASE_URL
+              value: {{ .Values.mcp.publicBaseURL | quote }}
             {{- end }}
             - name: METRICS_PORT
               value: {{ .Values.operator.metrics.port | quote }}
