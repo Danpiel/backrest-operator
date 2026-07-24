@@ -141,8 +141,6 @@ spec:
                   type: array
                   items:
                     type: string
-                  default:
-                    - /
                 excludes:
                   type: array
                   items:
@@ -185,6 +183,7 @@ spec:
                   type: string
                   enum:
                     - Pending
+                    - Scheduled
                     - Flushing
                     - Quiescing
                     - Snapshotting
@@ -204,6 +203,8 @@ spec:
                 lastDurationSeconds:
                   type: integer
                   format: int32
+                lastForceRun:
+                  type: string
                 conditions:
                   type: array
                   items:
