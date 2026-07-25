@@ -65,6 +65,16 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if backup.Status.Phase == "Uploading" && backup.Status.LastJobName != "" {
 		return r.pollBackupJob(ctx, &backup)
 	}
+	// Recover from status conflicts: an owned Job may already exist without Phase=Uploading.
+	if jobName, ok := r.findOwnedBackupJob(ctx, &backup); ok {
+		logger.Info("adopting existing restic job", "job", jobName)
+		backup.Status.Phase = "Uploading"
+		backup.Status.LastJobName = jobName
+		if err := r.Status().Update(ctx, &backup); err != nil {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return r.pollBackupJob(ctx, &backup)
+	}
 
 	if backup.Spec.Schedule != "" {
 		due, wait, err := scheduleDue(&backup)
@@ -207,6 +217,8 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.createResticBackupJob(ctx, &backup, &repo, jobName, uploadPVCs); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
+	// Keep workloads down even if later status patches conflict — Job already exists.
+	holdQuiesceForJob = true
 	if err := r.persistQuiesceState(ctx, &backup, quiesceState); err != nil {
 		logger.Error(err, "persist quiesce state")
 	}
@@ -214,9 +226,9 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// poll the previous Job name while Phase is already Uploading.
 	backup.Status.LastJobName = jobName
 	if err := r.Status().Update(ctx, &backup); err != nil {
-		return ctrl.Result{}, err
+		logger.Error(err, "status update after job create; will requeue to poll existing job")
+		return ctrl.Result{Requeue: true}, nil
 	}
-	holdQuiesceForJob = true
 	return r.pollBackupJob(ctx, &backup)
 }
 
@@ -451,6 +463,38 @@ func jobRetries(b *operatorv1alpha1.PVCBackup) int32 {
 		return *b.Spec.BackoffLimit
 	}
 	return 0
+}
+
+func (r *PVCBackupReconciler) findOwnedBackupJob(ctx context.Context, b *operatorv1alpha1.PVCBackup) (string, bool) {
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs, client.InNamespace(b.Namespace)); err != nil {
+		return "", false
+	}
+	prefix := "pvcbackup-" + b.Name + "-"
+	var newest string
+	var newestTS int64
+	for i := range jobs.Items {
+		j := &jobs.Items[i]
+		if !strings.HasPrefix(j.Name, prefix) {
+			continue
+		}
+		if !metav1.IsControlledBy(j, b) {
+			continue
+		}
+		// Skip finished jobs — only adopt in-flight work.
+		if j.Status.Succeeded > 0 || j.Status.Failed > 0 {
+			continue
+		}
+		ts := j.CreationTimestamp.Unix()
+		if ts >= newestTS {
+			newestTS = ts
+			newest = j.Name
+		}
+	}
+	if newest == "" {
+		return "", false
+	}
+	return newest, true
 }
 
 func (r *PVCBackupReconciler) quiesce(ctx context.Context, b *operatorv1alpha1.PVCBackup) (map[string]int32, error) {
