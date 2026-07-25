@@ -15,12 +15,20 @@ spec:
       rules:
         - alert: BackrestBackupFailed
           expr: increase(backrest_backup_failed_total[15m]) > 0
-          for: 5m
+          for: 1m
           labels:
             severity: critical
           annotations:
             summary: Backrest backup failed
-            description: A Backrest backup plan or PVC backup has failed recently.
+            description: A Backrest PVC backup has failed recently (workloads should be unquiesced).
+        - alert: BackrestRestoreFailed
+          expr: increase(backrest_restore_failed_total[15m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: Backrest restore failed
+            description: A Backrest PVC restore has failed (quiesced workloads are left down on purpose).
         - alert: BackrestBackupNotSucceedingWithinSLA
           expr: (time() - backrest_backup_last_success_timestamp_seconds) > {{ .Values.monitoring.backupSlaSeconds }}
           for: 15m

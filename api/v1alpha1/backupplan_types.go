@@ -3,15 +3,18 @@ package v1alpha1
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 type BackupPlanSpec struct {
-	RepositoryRef ObjectReference         `json:"repositoryRef"`
-	ClusterRef    ObjectReference         `json:"clusterRef,omitempty"`
-	Schedule      string                 `json:"schedule,omitempty"`
-	Paths         []string               `json:"paths,omitempty"`
-	Excludes      []string               `json:"excludes,omitempty"`
-	Retention     map[string]interface{} `json:"retention,omitempty"`
+	RepositoryRef ObjectReference           `json:"repositoryRef"`
+	ClusterRef    ObjectReference           `json:"clusterRef,omitempty"`
+	Schedule      string                   `json:"schedule,omitempty"`
+	Paths         []string                 `json:"paths,omitempty"`
+	Excludes      []string                 `json:"excludes,omitempty"`
+	Retention     map[string]interface{}   `json:"retention,omitempty"`
 	Hooks         []map[string]interface{} `json:"hooks,omitempty"`
-	Tags          []string               `json:"tags,omitempty"`
-	PVCBackupRef  ObjectReference         `json:"pvcBackupRef,omitempty"`
+	Tags          []string                 `json:"tags,omitempty"`
+	PVCBackupRef  ObjectReference          `json:"pvcBackupRef,omitempty"`
+	// Retries is how many times a failed restic Job may restart (Job backoffLimit).
+	// Default 0 — no retries. When pvcBackupRef is set, apply the same value on the PVCBackup.
+	Retries *int32 `json:"retries,omitempty"`
 }
 
 type BackupPlanStatus struct {

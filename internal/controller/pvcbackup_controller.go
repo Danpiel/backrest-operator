@@ -61,18 +61,9 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	_ = r.cleanupLegacyScheduleResources(ctx, &backup)
 
 	// Resume watching an in-flight Job without re-quiescing.
+	// Force-run while Uploading waits for the current Job (one task per repository).
 	if backup.Status.Phase == "Uploading" && backup.Status.LastJobName != "" {
-		// A newer force-run must not be swallowed by polling a previous Job.
-		if force := backup.Annotations[annForceRun]; force != "" && force != backup.Status.LastForceRun {
-			logger.Info("force-run requested while Uploading; starting a new run", "token", force, "previousJob", backup.Status.LastJobName)
-			// Claim the token immediately so concurrent reconciles cannot spawn a job storm.
-			backup.Status.LastForceRun = force
-			if err := r.Status().Update(ctx, &backup); err != nil {
-				return ctrl.Result{}, err
-			}
-		} else {
-			return r.pollBackupJob(ctx, &backup)
-		}
+		return r.pollBackupJob(ctx, &backup)
 	}
 
 	if backup.Spec.Schedule != "" {
@@ -81,7 +72,7 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return r.fail(ctx, &backup, err)
 		}
 		if !due {
-			if backup.Status.Phase != "Scheduled" {
+			if backup.Status.Phase != "Scheduled" && backup.Status.Phase != "Failed" {
 				backup.Status.Phase = "Scheduled"
 				_ = r.Status().Update(ctx, &backup)
 			}
@@ -102,8 +93,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			return ctrl.Result{RequeueAfter: wait}, nil
 		}
 		logger.Info("starting scheduled backup", "schedule", backup.Spec.Schedule)
-	} else if backup.Status.Phase == "Succeeded" {
-		return ctrl.Result{}, nil
+	} else if !forceRunPending(&backup) {
+		// One-shot backups idle after success/failure until a new force-run token.
+		switch backup.Status.Phase {
+		case "Succeeded", "Failed", "Scheduled":
+			return ctrl.Result{}, nil
+		}
 	}
 
 	// Claim force-run before quiesce/job create so requeues cannot start parallel runs.
@@ -141,6 +136,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	var repo operatorv1alpha1.BackupRepository
 	if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
 		return r.fail(ctx, &backup, err)
+	}
+	if busy, holder, err := repoTaskBusy(ctx, r.Client, repoNS, repo.Name, "PVCBackup", backup.Namespace, backup.Name); err != nil {
+		return ctrl.Result{}, err
+	} else if busy {
+		logger.Info("repository busy; waiting", "holder", holder, "repository", repo.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if err := r.ensureRepoSecrets(ctx, &backup, &repo); err != nil {
 		return r.fail(ctx, &backup, err)
@@ -239,8 +240,7 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 		}
 		backup.Status.LastBackupTime = time.Now().UTC().Format(time.RFC3339)
 		backup.Status.LastJobName = jobName
-		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "success").Inc()
-		metrics.BackupLastSuccess.WithLabelValues(backup.Namespace, backup.Name).Set(float64(time.Now().Unix()))
+		metrics.ObserveBackupSuccess(backup.Namespace, backup.Name, float64(time.Now().Unix()))
 		logger.Info("backup completed", "lastBackupTime", backup.Status.LastBackupTime)
 
 		repoNS := backup.Spec.RepositoryRef.Namespace
@@ -269,7 +269,6 @@ func (r *PVCBackupReconciler) pollBackupJob(ctx context.Context, backup *operato
 	if job.Status.Failed > 0 {
 		logger.Info("restic job failed, restoring workloads")
 		_ = r.releaseQuiesce(ctx, backup)
-		metrics.BackupTotal.WithLabelValues(backup.Namespace, backup.Name, "failure").Inc()
 		return r.fail(ctx, backup, fmt.Errorf("restic job failed"))
 	}
 	logger.V(1).Info("restic job still running")
@@ -341,8 +340,13 @@ func pvcList(b *operatorv1alpha1.PVCBackup) []string {
 	return nil
 }
 
+func forceRunPending(b *operatorv1alpha1.PVCBackup) bool {
+	force := b.Annotations[annForceRun]
+	return force != "" && force != b.Status.LastForceRun
+}
+
 func scheduleDue(b *operatorv1alpha1.PVCBackup) (due bool, wait time.Duration, err error) {
-	if force := b.Annotations[annForceRun]; force != "" && force != b.Status.LastForceRun {
+	if forceRunPending(b) {
 		return true, 0, nil
 	}
 	sched, err := cron.ParseStandard(b.Spec.Schedule)
@@ -355,6 +359,7 @@ func scheduleDue(b *operatorv1alpha1.PVCBackup) (due bool, wait time.Duration, e
 			from = t
 		}
 	}
+	// After a failed run LastBackupTime is the attempt time; Next(from) is the following slot.
 	next := sched.Next(from)
 	now := time.Now()
 	if now.Before(next) {
@@ -419,11 +424,33 @@ func (r *PVCBackupReconciler) mirrorSecret(ctx context.Context, srcNS, srcName, 
 func (r *PVCBackupReconciler) fail(ctx context.Context, b *operatorv1alpha1.PVCBackup, err error) (ctrl.Result, error) {
 	log.FromContext(ctx).Error(err, "backup failed", "pvcbackup", client.ObjectKeyFromObject(b))
 	metrics.ReconcileErrors.WithLabelValues("PVCBackup").Inc()
-	metrics.BackupTotal.WithLabelValues(b.Namespace, b.Name, "failure").Inc()
+	metrics.ObserveBackupFailure(b.Namespace, b.Name)
+	// Always try to bring workloads back after a failed backup (unless leaveDown).
+	_ = r.releaseQuiesce(ctx, b)
 	b.Status.Phase = "Failed"
+	// Advance the schedule cursor so a missed/failed window is not retried every reconcile.
+	b.Status.LastBackupTime = time.Now().UTC().Format(time.RFC3339)
 	b.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Failed", Status: "True", Message: err.Error()}}
 	_ = r.Status().Update(ctx, b)
-	return ctrl.Result{}, err
+	if b.Spec.Schedule != "" {
+		_, wait, serr := scheduleDue(b)
+		if serr == nil && wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+		return ctrl.Result{RequeueAfter: time.Hour}, nil
+	}
+	// Do not return err: controller-runtime would requeue immediately and storm Jobs.
+	return ctrl.Result{}, nil
+}
+
+func jobRetries(b *operatorv1alpha1.PVCBackup) int32 {
+	if b.Spec.Retries != nil {
+		return *b.Spec.Retries
+	}
+	if b.Spec.BackoffLimit != nil {
+		return *b.Spec.BackoffLimit
+	}
+	return 0
 }
 
 func (r *PVCBackupReconciler) quiesce(ctx context.Context, b *operatorv1alpha1.PVCBackup) (map[string]int32, error) {
@@ -558,10 +585,7 @@ func strPtr(s string) *string { return &s }
 
 func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *operatorv1alpha1.PVCBackup, repo *operatorv1alpha1.BackupRepository, jobName string, pvcNames []string) error {
 	enableLinks := false
-	backoff := int32(2)
-	if b.Spec.BackoffLimit != nil {
-		backoff = *b.Spec.BackoffLimit
-	}
+	backoff := jobRetries(b)
 	ttl := int32(86400)
 	if b.Spec.TTLSecondsAfterFinished != nil {
 		ttl = *b.Spec.TTLSecondsAfterFinished
@@ -604,9 +628,10 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 		}
 	}
 
-	cmd := []string{"sh", "-ec", "restic snapshots >/dev/null 2>&1 || restic init; restic backup " + strings.Join(shellQuote(paths), " ")}
+	// Unlock stale locks, backup with lock retry; retention must not fail a successful backup.
+	script := "restic unlock || true; restic snapshots >/dev/null 2>&1 || restic init; restic backup --retry-lock 5m " + strings.Join(shellQuote(paths), " ")
 	for _, ex := range b.Spec.Excludes {
-		cmd[2] += " --exclude " + shellQuoteOne(ex)
+		script += " --exclude " + shellQuoteOne(ex)
 	}
 	// Tag so Backrest UI associates snapshots with the synced plan/instance.
 	planID := planIDForPVCBackup(b)
@@ -623,11 +648,12 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 			instance = instanceForCluster(clusterName)
 		}
 	}
-	cmd[2] += " --tag " + shellQuoteOne(backrest.PlanTag(planID))
-	cmd[2] += " --tag " + shellQuoteOne(backrest.InstanceTag(instance))
+	script += " --tag " + shellQuoteOne(backrest.PlanTag(planID))
+	script += " --tag " + shellQuoteOne(backrest.InstanceTag(instance))
 	if b.Spec.Retention.KeepLast != nil {
-		cmd[2] += fmt.Sprintf(" && restic forget --tag %s --keep-last %d --prune", shellQuoteOne(backrest.PlanTag(planID)), *b.Spec.Retention.KeepLast)
+		script += fmt.Sprintf("; restic forget --retry-lock 5m --tag %s --keep-last %d --prune || true", shellQuoteOne(backrest.PlanTag(planID)), *b.Spec.Retention.KeepLast)
 	}
+	cmd := []string{"sh", "-ec", script}
 
 	env := resticEnv(repo)
 	container := corev1.Container{

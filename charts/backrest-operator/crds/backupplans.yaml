@@ -108,6 +108,14 @@ spec:
                       type: string
                     namespace:
                       type: string
+                retries:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  default: 0
+                  description: >-
+                    Job pod retries for linked PVCBackup restic Jobs.
+                    Default 0 — no retries on failure.
             status:
               type: object
               properties:

@@ -167,11 +167,19 @@ spec:
                     deleteVolumeSnapshotAfterUpload:
                       type: boolean
                       default: true
+                retries:
+                  type: integer
+                  format: int32
+                  minimum: 0
+                  default: 0
+                  description: >-
+                    Job pod retries (backoffLimit) for the restic Job.
+                    Default 0 — failed backups are not retried.
                 backoffLimit:
                   type: integer
                   format: int32
                   minimum: 0
-                  default: 2
+                  description: Deprecated alias for retries. Prefer spec.retries.
                 ttlSecondsAfterFinished:
                   type: integer
                   format: int32

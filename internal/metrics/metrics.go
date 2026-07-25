@@ -8,6 +8,23 @@ import (
 )
 
 var (
+	// Alert-facing metrics (names must match VMRule / PrometheusRule).
+	BackupFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "backrest_backup_failed_total",
+		Help: "PVC backup failures (alert: BackrestBackupFailed)",
+	}, []string{"namespace", "name"})
+
+	BackupLastSuccessSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "backrest_backup_last_success_timestamp_seconds",
+		Help: "Unix timestamp of last successful backup (alert SLA)",
+	}, []string{"namespace", "name"})
+
+	RestoreFailedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "backrest_restore_failed_total",
+		Help: "PVC restore failures (alert: BackrestRestoreFailed)",
+	}, []string{"namespace", "name"})
+
+	// Legacy / detailed counters kept for dashboards.
 	BackupTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "backrest_operator_backup_total",
 		Help: "PVC backup attempts",
@@ -21,7 +38,7 @@ var (
 
 	BackupLastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "backrest_operator_backup_last_success_timestamp",
-		Help: "Unix timestamp of last successful backup",
+		Help: "Unix timestamp of last successful backup (legacy name)",
 	}, []string{"namespace", "name"})
 
 	ReconcileErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -31,7 +48,33 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(BackupTotal, BackupDuration, BackupLastSuccess, ReconcileErrors)
+	prometheus.MustRegister(
+		BackupFailedTotal,
+		BackupLastSuccessSeconds,
+		RestoreFailedTotal,
+		BackupTotal,
+		BackupDuration,
+		BackupLastSuccess,
+		ReconcileErrors,
+	)
+}
+
+// ObserveBackupSuccess updates success metrics used by SLA alerts.
+func ObserveBackupSuccess(namespace, name string, unixTs float64) {
+	BackupTotal.WithLabelValues(namespace, name, "success").Inc()
+	BackupLastSuccess.WithLabelValues(namespace, name).Set(unixTs)
+	BackupLastSuccessSeconds.WithLabelValues(namespace, name).Set(unixTs)
+}
+
+// ObserveBackupFailure increments failure counters used by BackrestBackupFailed.
+func ObserveBackupFailure(namespace, name string) {
+	BackupTotal.WithLabelValues(namespace, name, "failure").Inc()
+	BackupFailedTotal.WithLabelValues(namespace, name).Inc()
+}
+
+// ObserveRestoreFailure increments restore failure counters.
+func ObserveRestoreFailure(namespace, name string) {
+	RestoreFailedTotal.WithLabelValues(namespace, name).Inc()
 }
 
 // StartServer serves /metrics on addr (e.g. :8080).

@@ -17,8 +17,11 @@ type PVCBackupSpec struct {
 	Schedule                string                `json:"schedule,omitempty"`
 	Retention               PVCBackupRetention    `json:"retention,omitempty"`
 	NodeSelector            map[string]string     `json:"nodeSelector,omitempty"`
-	BackoffLimit            *int32                `json:"backoffLimit,omitempty"`
-	TTLSecondsAfterFinished *int32                `json:"ttlSecondsAfterFinished,omitempty"`
+	// Retries is the Job backoffLimit for the restic Job. Default 0 (no retries).
+	Retries *int32 `json:"retries,omitempty"`
+	// BackoffLimit is deprecated; use Retries. Kept for compatibility.
+	BackoffLimit            *int32 `json:"backoffLimit,omitempty"`
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 type PVCBackupStrategy struct {

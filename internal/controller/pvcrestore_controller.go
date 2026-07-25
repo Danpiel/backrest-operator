@@ -21,6 +21,8 @@ import (
 	"github.com/Danpiel/backrest-operator/internal/metrics"
 )
 
+const annRestoreQuiesceState = "operator.backrest.io/restore-quiesce-state"
+
 type PVCRestoreReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -36,8 +38,13 @@ func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
 	}
-	if restore.Status.Phase == "Succeeded" {
+	switch restore.Status.Phase {
+	case "Succeeded", "Failed":
 		return ctrl.Result{}, nil
+	case "Restoring":
+		if restore.Status.LastJobName != "" {
+			return r.pollRestoreJob(ctx, &restore)
+		}
 	}
 
 	mode := restore.Spec.Mode
@@ -47,27 +54,26 @@ func (r *PVCRestoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.restoreFromSnapshot(ctx, &restore); err != nil {
 			return r.fail(ctx, &restore, err)
 		}
+		restore.Status.Phase = "Succeeded"
+		return ctrl.Result{}, r.Status().Update(ctx, &restore)
 	case "fromResticToNewPVC", "fromResticToExistingPVC":
-		if err := r.restoreRestic(ctx, &restore); err != nil {
-			return r.fail(ctx, &restore, err)
-		}
+		return r.startResticRestore(ctx, &restore)
 	case "export":
 		return r.fail(ctx, &restore, fmt.Errorf("mode export is removed; use Backrest GetDownloadURL / MCP get_snapshot_download_url"))
 	default:
 		return r.fail(ctx, &restore, fmt.Errorf("unknown mode %s", mode))
 	}
-	restore.Status.Phase = "Succeeded"
-	logger.Info("restore finished", "mode", mode, "job", restore.Status.LastJobName)
-	return ctrl.Result{}, r.Status().Update(ctx, &restore)
 }
 
 func (r *PVCRestoreReconciler) fail(ctx context.Context, restore *operatorv1alpha1.PVCRestore, err error) (ctrl.Result, error) {
 	log.FromContext(ctx).Error(err, "restore failed", "pvcrestore", client.ObjectKeyFromObject(restore))
 	metrics.ReconcileErrors.WithLabelValues("PVCRestore").Inc()
+	metrics.ObserveRestoreFailure(restore.Namespace, restore.Name)
+	// On restore failure: alert via metrics, do NOT restart quiesced workloads.
 	restore.Status.Phase = "Failed"
 	restore.Status.Conditions = []operatorv1alpha1.Condition{{Type: "Failed", Status: "True", Message: err.Error()}}
 	_ = r.Status().Update(ctx, restore)
-	return ctrl.Result{}, err
+	return ctrl.Result{}, nil
 }
 
 func (r *PVCRestoreReconciler) restoreFromSnapshot(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
@@ -105,17 +111,25 @@ func (r *PVCRestoreReconciler) restoreFromSnapshot(ctx context.Context, restore 
 	return err
 }
 
-func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+func (r *PVCRestoreReconciler) startResticRestore(ctx context.Context, restore *operatorv1alpha1.PVCRestore) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("pvcrestore", client.ObjectKeyFromObject(restore))
 	repoNS := restore.Spec.RepositoryRef.Namespace
 	if repoNS == "" {
 		repoNS = restore.Namespace
 	}
 	var repo operatorv1alpha1.BackupRepository
 	if err := r.Get(ctx, types.NamespacedName{Name: restore.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
-		return err
+		return r.fail(ctx, restore, err)
 	}
+	if busy, holder, err := repoTaskBusy(ctx, r.Client, repoNS, repo.Name, "PVCRestore", restore.Namespace, restore.Name); err != nil {
+		return ctrl.Result{}, err
+	} else if busy {
+		logger.Info("repository busy; waiting", "holder", holder, "repository", repo.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	var pvcName string
-	var quiesceState map[string]int32
+	br := &PVCBackupReconciler{Client: r.Client, Scheme: r.Scheme}
 	if restore.Spec.Mode == "fromResticToNewPVC" {
 		pvcName = restore.Spec.Target.NewPVC.Name
 		if pvcName == "" {
@@ -138,36 +152,38 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 			pvc.Spec.StorageClassName = &sc
 		}
 		if err := r.Create(ctx, pvc); err != nil && !apierrors.IsAlreadyExists(err) {
-			return err
+			return r.fail(ctx, restore, err)
 		}
 	} else {
 		pvcName = restore.Spec.Target.ExistingPVCName
 		if pvcName == "" {
-			return fmt.Errorf("target.existingPVCName required")
+			return r.fail(ctx, restore, fmt.Errorf("target.existingPVCName required"))
 		}
 		if restore.Spec.Quiesce.Enabled {
-			// reuse PVCBackup reconciler helpers via local scale
-			br := &PVCBackupReconciler{Client: r.Client, Scheme: r.Scheme}
+			restore.Status.Phase = "Quiescing"
+			_ = r.Status().Update(ctx, restore)
 			fake := &operatorv1alpha1.PVCBackup{
 				ObjectMeta: metav1.ObjectMeta{Namespace: restore.Namespace},
 				Spec:       operatorv1alpha1.PVCBackupSpec{Quiesce: restore.Spec.Quiesce},
 			}
-			var err error
-			quiesceState, err = br.quiesce(ctx, fake)
+			quiesceState, err := br.quiesce(ctx, fake)
 			if err != nil {
-				return err
+				return r.fail(ctx, restore, err)
 			}
-			defer func() { _ = br.unquiesce(ctx, restore.Namespace, quiesceState) }()
+			if err := r.persistRestoreQuiesce(ctx, restore, quiesceState); err != nil {
+				return r.fail(ctx, restore, err)
+			}
 		}
 	}
+
 	snap := restore.Spec.Restic.SnapshotID
 	if snap == "" {
 		snap = "latest"
 	}
 	if err := r.ensureRestoreRepoSecrets(ctx, restore, &repo, repoNS); err != nil {
-		return err
+		return r.fail(ctx, restore, err)
 	}
-	cmd := []string{"sh", "-ec", "restic restore " + snap + " --target /data"}
+	cmd := []string{"sh", "-ec", "restic unlock || true; restic restore --retry-lock 5m " + snap + " --target /data"}
 	for _, p := range restore.Spec.Restic.PathFilters {
 		cmd[2] += " --include " + shellQuoteOne(p)
 	}
@@ -176,6 +192,7 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 		jobName = jobName[:63]
 	}
 	enableLinks := false
+	zero := int32(0)
 	resticContainer := corev1.Container{
 		Name:    "restic",
 		Image:   resticImage,
@@ -193,6 +210,7 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: jobName, Namespace: restore.Namespace},
 		Spec: batchv1.JobSpec{
+			BackoffLimit: &zero,
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -209,10 +227,92 @@ func (r *PVCRestoreReconciler) restoreRestic(ctx context.Context, restore *opera
 		},
 	}
 	if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
+		return r.fail(ctx, restore, err)
 	}
 	restore.Status.LastJobName = jobName
+	restore.Status.Phase = "Restoring"
+	if err := r.Status().Update(ctx, restore); err != nil {
+		return ctrl.Result{}, err
+	}
+	return r.pollRestoreJob(ctx, restore)
+}
+
+func (r *PVCRestoreReconciler) pollRestoreJob(ctx context.Context, restore *operatorv1alpha1.PVCRestore) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues("pvcrestore", client.ObjectKeyFromObject(restore), "job", restore.Status.LastJobName)
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Name: restore.Status.LastJobName, Namespace: restore.Namespace}, &job); err != nil {
+		return r.fail(ctx, restore, fmt.Errorf("restic restore job %s: %w", restore.Status.LastJobName, err))
+	}
+	if job.Status.Succeeded > 0 {
+		logger.Info("restic restore succeeded; unquiescing workloads")
+		_ = r.releaseRestoreQuiesce(ctx, restore)
+		restore.Status.Phase = "Succeeded"
+		return ctrl.Result{}, r.Status().Update(ctx, restore)
+	}
+	if job.Status.Failed > 0 {
+		logger.Info("restic restore failed; leaving workloads down")
+		return r.fail(ctx, restore, fmt.Errorf("restic restore job failed"))
+	}
+	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+func (r *PVCRestoreReconciler) persistRestoreQuiesce(ctx context.Context, restore *operatorv1alpha1.PVCRestore, state map[string]int32) error {
+	if len(state) == 0 {
+		return nil
+	}
+	raw, err := jsonMarshal(state)
+	if err != nil {
+		return err
+	}
+	var cur operatorv1alpha1.PVCRestore
+	if err := r.Get(ctx, types.NamespacedName{Name: restore.Name, Namespace: restore.Namespace}, &cur); err != nil {
+		return err
+	}
+	if cur.Annotations == nil {
+		cur.Annotations = map[string]string{}
+	}
+	cur.Annotations[annRestoreQuiesceState] = string(raw)
+	if err := r.Update(ctx, &cur); err != nil {
+		return err
+	}
+	restore.Annotations = cur.Annotations
 	return nil
+}
+
+func (r *PVCRestoreReconciler) releaseRestoreQuiesce(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+	if restore.Spec.Quiesce.LeaveDown {
+		return r.clearRestoreQuiesceAnnotation(ctx, restore)
+	}
+	state := map[string]int32{}
+	if raw := restore.Annotations[annRestoreQuiesceState]; raw != "" {
+		_ = jsonUnmarshal([]byte(raw), &state)
+	}
+	if len(state) == 0 {
+		for _, t := range restore.Spec.Quiesce.Targets {
+			ns := t.Namespace
+			if ns == "" {
+				ns = restore.Namespace
+			}
+			state[t.Kind+"/"+ns+"/"+t.Name] = 1
+		}
+	}
+	br := &PVCBackupReconciler{Client: r.Client, Scheme: r.Scheme}
+	if err := br.unquiesce(ctx, restore.Namespace, state); err != nil {
+		return err
+	}
+	return r.clearRestoreQuiesceAnnotation(ctx, restore)
+}
+
+func (r *PVCRestoreReconciler) clearRestoreQuiesceAnnotation(ctx context.Context, restore *operatorv1alpha1.PVCRestore) error {
+	var cur operatorv1alpha1.PVCRestore
+	if err := r.Get(ctx, types.NamespacedName{Name: restore.Name, Namespace: restore.Namespace}, &cur); err != nil {
+		return err
+	}
+	if cur.Annotations == nil || cur.Annotations[annRestoreQuiesceState] == "" {
+		return nil
+	}
+	delete(cur.Annotations, annRestoreQuiesceState)
+	return r.Update(ctx, &cur)
 }
 
 func (r *PVCRestoreReconciler) ensureRestoreRepoSecrets(ctx context.Context, restore *operatorv1alpha1.PVCRestore, repo *operatorv1alpha1.BackupRepository, repoNS string) error {

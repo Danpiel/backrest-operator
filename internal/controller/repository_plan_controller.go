@@ -191,8 +191,32 @@ func (r *BackupPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Info("plan sync skipped (set BackupRepository.spec.backrest.syncToHost or plan.clusterRef)")
 	}
 
+	if err := r.propagateRetriesToPVCBackup(ctx, &plan); err != nil {
+		logger.Error(err, "propagate retries to PVCBackup")
+		return ctrl.Result{}, err
+	}
+
 	plan.Status.Phase = "Ready"
 	return ctrl.Result{}, r.Status().Update(ctx, &plan)
+}
+
+func (r *BackupPlanReconciler) propagateRetriesToPVCBackup(ctx context.Context, plan *operatorv1alpha1.BackupPlan) error {
+	if plan.Spec.PVCBackupRef.Name == "" || plan.Spec.Retries == nil {
+		return nil
+	}
+	ns := plan.Spec.PVCBackupRef.Namespace
+	if ns == "" {
+		ns = plan.Namespace
+	}
+	var b operatorv1alpha1.PVCBackup
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: plan.Spec.PVCBackupRef.Name}, &b); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if b.Spec.Retries != nil && *b.Spec.Retries == *plan.Spec.Retries {
+		return nil
+	}
+	b.Spec.Retries = plan.Spec.Retries
+	return r.Update(ctx, &b)
 }
 
 func orStrings(v []string) []string {
