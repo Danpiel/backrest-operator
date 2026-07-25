@@ -651,7 +651,8 @@ func (r *PVCBackupReconciler) createResticBackupJob(ctx context.Context, b *oper
 	script += " --tag " + shellQuoteOne(backrest.PlanTag(planID))
 	script += " --tag " + shellQuoteOne(backrest.InstanceTag(instance))
 	if b.Spec.Retention.KeepLast != nil {
-		script += fmt.Sprintf("; restic forget --retry-lock 5m --tag %s --keep-last %d --prune || true", shellQuoteOne(backrest.PlanTag(planID)), *b.Spec.Retention.KeepLast)
+		// Group by tags only: Job pods use unique hostnames, so default host grouping would keep everything.
+		script += fmt.Sprintf("; restic forget --retry-lock 5m --group-by tags --tag %s --keep-last %d --prune || true", shellQuoteOne(backrest.PlanTag(planID)), *b.Spec.Retention.KeepLast)
 	}
 	cmd := []string{"sh", "-ec", script}
 
