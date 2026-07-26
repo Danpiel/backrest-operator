@@ -121,11 +121,31 @@ func (r *PVCRestoreReconciler) startResticRestore(ctx context.Context, restore *
 	if err := r.Get(ctx, types.NamespacedName{Name: restore.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
 		return r.fail(ctx, restore, err)
 	}
-	if busy, holder, err := repoTaskBusy(ctx, r.Client, repoNS, repo.Name, "PVCRestore", restore.Namespace, restore.Name); err != nil {
+	// PVC mount session: same disk → one Job; restore preempts backup; other disks / archives unlocked.
+	sessionKeys := restorePVCKeys(restore)
+	holders, err := listPVCSessionHolders(ctx, r.Client, sessionKeys, "PVCRestore", restore.Namespace, restore.Name)
+	if err != nil {
 		return ctrl.Result{}, err
-	} else if busy {
-		logger.Info("repository busy; waiting", "holder", holder, "repository", repo.Name)
+	}
+	if restores := holdersOfKind(holders, "PVCRestore"); len(restores) > 0 {
+		logger.Info("PVC session busy; waiting for other restore", "holder", formatHolders(restores), "pvcs", sessionKeys)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	for _, h := range holdersOfKind(holders, "PVCBackup") {
+		var b operatorv1alpha1.PVCBackup
+		if err := r.Get(ctx, types.NamespacedName{Name: h.Name, Namespace: h.Namespace}, &b); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return ctrl.Result{}, err
+		}
+		if !backupPhaseActive(b.Status.Phase) {
+			continue
+		}
+		logger.Info("interrupting backup for restore", "pvcbackup", h.Namespace+"/"+h.Name, "phase", b.Status.Phase, "pvcs", sessionKeys)
+		if err := interruptBackup(ctx, r.Client, r.Scheme, &b, fmt.Sprintf("interrupted by PVCRestore/%s/%s (same PVC mount)", restore.Namespace, restore.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	var pvcName string

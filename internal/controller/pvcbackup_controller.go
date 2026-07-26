@@ -61,9 +61,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	_ = r.cleanupLegacyScheduleResources(ctx, &backup)
 
 	// Resume watching an in-flight Job without re-quiescing.
-	// Force-run while Uploading waits for the current Job (one task per repository).
+	// One Job per PVC session; a restore to the same disk may interrupt us via fail().
 	if backup.Status.Phase == "Uploading" && backup.Status.LastJobName != "" {
 		return r.pollBackupJob(ctx, &backup)
+	}
+	if backup.Status.Phase == "Failed" && !forceRunPending(&backup) && backup.Spec.Schedule == "" {
+		return ctrl.Result{}, nil
 	}
 	// Recover from status conflicts: an owned Job may already exist without Phase=Uploading.
 	if jobName, ok := r.findOwnedBackupJob(ctx, &backup); ok {
@@ -147,10 +150,12 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Get(ctx, types.NamespacedName{Name: backup.Spec.RepositoryRef.Name, Namespace: repoNS}, &repo); err != nil {
 		return r.fail(ctx, &backup, err)
 	}
-	if busy, holder, err := repoTaskBusy(ctx, r.Client, repoNS, repo.Name, "PVCBackup", backup.Namespace, backup.Name); err != nil {
+	// Serialize mounts: wait if another backup/restore holds an overlapping PVC.
+	// (SnapshotDownload and restores to a different disk do not block us.)
+	if busy, holder, err := pvcSessionBusy(ctx, r.Client, backupPVCKeys(&backup), "PVCBackup", backup.Namespace, backup.Name); err != nil {
 		return ctrl.Result{}, err
 	} else if busy {
-		logger.Info("repository busy; waiting", "holder", holder, "repository", repo.Name)
+		logger.Info("PVC session busy; waiting", "holder", holder, "pvcs", pvcs)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if err := r.ensureRepoSecrets(ctx, &backup, &repo); err != nil {
@@ -206,6 +211,19 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if step == "liveFlush" {
 			logger.Info("liveFlush requested but not implemented yet; continuing pipeline")
 		}
+	}
+
+	// Re-check before Job create: a restore may have claimed / interrupted us while we quiesced.
+	var fresh operatorv1alpha1.PVCBackup
+	if err := r.Get(ctx, types.NamespacedName{Name: backup.Name, Namespace: backup.Namespace}, &fresh); err == nil && fresh.Status.Phase == "Failed" {
+		logger.Info("backup interrupted before job create; aborting")
+		return ctrl.Result{}, nil
+	}
+	if busy, holder, err := pvcSessionBusy(ctx, r.Client, backupPVCKeys(&backup), "PVCBackup", backup.Namespace, backup.Name); err != nil {
+		return ctrl.Result{}, err
+	} else if busy {
+		logger.Info("PVC session busy before job create; waiting", "holder", holder, "pvcs", pvcs)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	backup.Status.Phase = "Uploading"
@@ -434,7 +452,23 @@ func (r *PVCBackupReconciler) mirrorSecret(ctx context.Context, srcNS, srcName, 
 }
 
 func (r *PVCBackupReconciler) fail(ctx context.Context, b *operatorv1alpha1.PVCBackup, err error) (ctrl.Result, error) {
-	log.FromContext(ctx).Error(err, "backup failed", "pvcbackup", client.ObjectKeyFromObject(b))
+	logger := log.FromContext(ctx).WithValues("pvcbackup", client.ObjectKeyFromObject(b))
+	// Idempotent: restore preempt or a racing poll may call fail twice.
+	var cur operatorv1alpha1.PVCBackup
+	if gerr := r.Get(ctx, types.NamespacedName{Name: b.Name, Namespace: b.Namespace}, &cur); gerr == nil && cur.Status.Phase == "Failed" {
+		_ = r.releaseQuiesce(ctx, &cur)
+		*b = cur
+		if b.Spec.Schedule != "" {
+			_, wait, serr := scheduleDue(b)
+			if serr == nil && wait > 0 {
+				return ctrl.Result{RequeueAfter: wait}, nil
+			}
+			return ctrl.Result{RequeueAfter: time.Hour}, nil
+		}
+		return ctrl.Result{}, nil
+	}
+
+	logger.Error(err, "backup failed")
 	metrics.ReconcileErrors.WithLabelValues("PVCBackup").Inc()
 	metrics.ObserveBackupFailure(b.Namespace, b.Name)
 	// Always try to bring workloads back after a failed backup (unless leaveDown).
