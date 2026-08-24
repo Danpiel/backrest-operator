@@ -65,7 +65,7 @@ type Config struct {
 	Modno    int                    `json:"modno,omitempty"`
 	Version  int                    `json:"version,omitempty"`
 	Instance string                 `json:"instance,omitempty"`
-	Repos     []Repo                 `json:"repos,omitempty"`
+	Repos    []Repo                 `json:"repos,omitempty"`
 	Plans    []Plan                 `json:"plans,omitempty"`
 	Auth     map[string]interface{} `json:"auth,omitempty"`
 	Sync     map[string]interface{} `json:"sync,omitempty"`
@@ -189,6 +189,35 @@ func (c *Client) UpsertPlan(ctx context.Context, plan Plan) error {
 	if !found {
 		cfg.Plans = append(cfg.Plans, plan)
 	}
+	_, err = c.SetConfig(ctx, cfg)
+	return err
+}
+
+// DeletePlan removes a plan from the host config by ID (no-op if absent).
+func (c *Client) DeletePlan(ctx context.Context, planID string) error {
+	if planID == "" {
+		return nil
+	}
+	cfg, err := c.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if cfg.Instance == "" {
+		return fmt.Errorf("backrest instance is not set")
+	}
+	kept := cfg.Plans[:0]
+	found := false
+	for _, p := range cfg.Plans {
+		if p.ID == planID {
+			found = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	if !found {
+		return nil
+	}
+	cfg.Plans = kept
 	_, err = c.SetConfig(ctx, cfg)
 	return err
 }

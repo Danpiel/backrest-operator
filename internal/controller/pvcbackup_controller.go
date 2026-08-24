@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	annForceRun     = "operator.backrest.io/force-run"
-	annQuiesceState = "operator.backrest.io/quiesce-state"
+	annForceRun       = "operator.backrest.io/force-run"
+	annQuiesceState   = "operator.backrest.io/quiesce-state"
+	finalizerHostPlan = "operator.backrest.io/host-plan"
 
 	podDeleteTimeout = 5 * time.Minute
 )
@@ -52,6 +53,26 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if !filters.ObjectAllowed(backup.Namespace, backup.Labels) {
 		logger.V(1).Info("skipped by watch filter")
 		return ctrl.Result{}, nil
+	}
+
+	if !backup.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&backup, finalizerHostPlan) {
+			if err := removePVCBackupPlanFromHost(ctx, r.Client, &backup); err != nil {
+				logger.Error(err, "remove host plan on delete")
+				return ctrl.Result{Requeue: true}, err
+			}
+			controllerutil.RemoveFinalizer(&backup, finalizerHostPlan)
+			if err := r.Update(ctx, &backup); err != nil {
+				return ctrl.Result{Requeue: true}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	if !controllerutil.ContainsFinalizer(&backup, finalizerHostPlan) {
+		controllerutil.AddFinalizer(&backup, finalizerHostPlan)
+		if err := r.Update(ctx, &backup); err != nil {
+			return ctrl.Result{Requeue: true}, err
+		}
 	}
 
 	pvcs := pvcList(&backup)

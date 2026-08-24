@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -204,5 +205,30 @@ func syncPVCBackupPlanToHost(ctx context.Context, c client.Client, b *operatorv1
 		log.FromContext(ctx).Error(err, "index snapshots after plan sync")
 	}
 	log.FromContext(ctx).V(1).Info("synced PVCBackup plan to Backrest UI", "plan", plan.ID, "repo", repo.Name)
+	return nil
+}
+
+func removePVCBackupPlanFromHost(ctx context.Context, c client.Client, b *operatorv1alpha1.PVCBackup) error {
+	var repo operatorv1alpha1.BackupRepository
+	ns := b.Spec.RepositoryRef.Namespace
+	if ns == "" {
+		ns = b.Namespace
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: b.Spec.RepositoryRef.Name, Namespace: ns}, &repo); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !repo.Spec.Backrest.SyncToHost {
+		return nil
+	}
+	clusterNS, clusterName := resolveClusterRef(repo.Spec.Backrest.ClusterRef, repo.Namespace)
+	bc := hostClientForCluster(clusterNS, clusterName)
+	planID := planIDForPVCBackup(b)
+	if err := bc.DeletePlan(ctx, planID); err != nil {
+		return err
+	}
+	log.FromContext(ctx).Info("removed PVCBackup plan from Backrest host", "plan", planID, "repo", repo.Name)
 	return nil
 }
