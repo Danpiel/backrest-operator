@@ -30,6 +30,8 @@ import (
 const (
 	annForceRun     = "operator.backrest.io/force-run"
 	annQuiesceState = "operator.backrest.io/quiesce-state"
+
+	podDeleteTimeout = 5 * time.Minute
 )
 
 var volumeSnapshotGVK = schema.GroupVersionKind{
@@ -170,7 +172,9 @@ func (r *PVCBackupReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 	if needQuiesce {
 		backup.Status.Phase = "Quiescing"
-		_ = r.Status().Update(ctx, &backup)
+		if err := r.Status().Update(ctx, &backup); err != nil {
+			return ctrl.Result{Requeue: true}, err
+		}
 		logger.Info("quiescing workloads", "targets", len(backup.Spec.Quiesce.Targets))
 		var err error
 		quiesceState, err = r.quiesce(ctx, &backup)
@@ -563,8 +567,28 @@ func split3(s string) []string {
 }
 
 func (r *PVCBackupReconciler) scaleWorkload(ctx context.Context, kind, ns, name string, replicas int32) (int32, error) {
-	switch kind {
-	case "StatefulSet":
+	switch {
+	case strings.EqualFold(kind, "Pod"):
+		if replicas > 0 {
+			// Unquiesce: workload controller recreates the pod.
+			return replicas, nil
+		}
+		key := types.NamespacedName{Name: name, Namespace: ns}
+		var pod corev1.Pod
+		if err := r.Get(ctx, key, &pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		if err := r.Delete(ctx, &pod); err != nil && !apierrors.IsNotFound(err) {
+			return 1, err
+		}
+		if err := r.waitPodDeleted(ctx, ns, name, podDeleteTimeout); err != nil {
+			return 1, err
+		}
+		return 1, nil
+	case kind == "StatefulSet":
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"})
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, u); err != nil {
@@ -575,7 +599,7 @@ func (r *PVCBackupReconciler) scaleWorkload(ctx context.Context, kind, ns, name 
 			return 0, err
 		}
 		return int32(prev), r.Update(ctx, u)
-	case "Deployment":
+	case kind == "Deployment":
 		u := &unstructured.Unstructured{}
 		u.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"})
 		if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, u); err != nil {
@@ -587,8 +611,35 @@ func (r *PVCBackupReconciler) scaleWorkload(ctx context.Context, kind, ns, name 
 		}
 		return int32(prev), r.Update(ctx, u)
 	default:
-		return 0, fmt.Errorf("unsupported quiesce kind %s (scaleToZero only; deletePods not implemented)", kind)
+		return 0, fmt.Errorf("unsupported quiesce kind %s (supported: StatefulSet, Deployment, Pod)", kind)
 	}
+}
+
+func (r *PVCBackupReconciler) waitPodDeleted(ctx context.Context, ns, name string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	key := types.NamespacedName{Name: name, Namespace: ns}
+	for time.Now().Before(deadline) {
+		var pod corev1.Pod
+		err := r.Get(ctx, key, &pod)
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if pod.DeletionTimestamp == nil {
+			// Pod reappeared or delete not yet visible; re-issue delete.
+			if derr := r.Delete(ctx, &pod); derr != nil && !apierrors.IsNotFound(derr) {
+				return derr
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return fmt.Errorf("pod %s/%s not deleted within %s", ns, name, timeout)
 }
 
 func (r *PVCBackupReconciler) createSnapshot(ctx context.Context, b *operatorv1alpha1.PVCBackup, snapName, pvcName string) error {
