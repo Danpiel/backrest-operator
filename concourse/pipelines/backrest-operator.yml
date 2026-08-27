@@ -158,12 +158,13 @@ jobs:
           steps:
             - get: app-git-tags
               trigger: true
+            - get: app-git-concourse
             - get: ci-shared
               passed: [set-self]
             - get: builder-image
       - task: release
         image: builder-image
-        file: app-git/concourse/tasks/release.yml
+        file: app-git-concourse/concourse/tasks/release.yml
         input_mapping:
           app-git: app-git-tags
           ci-shared: ci-shared
