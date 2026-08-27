@@ -1,10 +1,8 @@
 name: ci
 
+# Automatic triggers disabled — CI runs on Concourse (https://ci.prq-infra.net).
+# Re-enable push/pull_request here if rolling back from Concourse.
 on:
-  push:
-    branches: [main, master]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
 
 permissions:

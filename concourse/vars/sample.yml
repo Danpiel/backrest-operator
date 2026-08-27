@@ -1,0 +1,16 @@
+# Sample Concourse vars for backrest-operator pipeline validation.
+
+github-access-token:
+  username: git
+  password: CHANGE_ME
+
+ghcr-credentials:
+  username: CHANGE_ME
+  password: CHANGE_ME
+
+webhook-token-backrest-operator: CHANGE_ME
+webhook-token-backrest-operator-tags: CHANGE_ME
+
+slack-ci:
+  token: CHANGE_ME
+  channel: ci

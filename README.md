@@ -31,6 +31,19 @@ kubectl get pvcbackup -A -w
 
 Bind your user to a shipped ClusterRole before using MCP — see [examples/rbac-binding.yaml](./examples/rbac-binding.yaml).
 
+## CI (Concourse)
+
+Primary CI/CD: [Concourse](https://ci.prq-infra.net) pipeline **`backrest-operator`**.
+
+| Trigger | Jobs |
+|---------|------|
+| Push `master` | `unit-test` + `helm-lint` → `build-images` (operator + MCP → GHCR) |
+| Tag `v*` | `release` (tests, images, Helm chart OCI, GitHub Release) |
+
+Pipeline YAML: `concourse/pipelines/`. Bootstrap: `Reactive-Network/infra` → `concourse/scripts/set-pipelines.sh`.
+
+GitHub Actions (`.github/workflows/ci.yaml`) is **manual-only** fallback.
+
 ## Documentation
 
 | Doc | Description |
