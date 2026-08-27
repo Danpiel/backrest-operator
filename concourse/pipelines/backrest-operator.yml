@@ -83,6 +83,8 @@ jobs:
       - in_parallel:
           - get: app-git
             trigger: true
+          - get: ci-config
+            trigger: true
           - get: ci-shared
             trigger: true
       - task: render-and-validate
