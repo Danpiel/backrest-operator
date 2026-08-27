@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/Danpiel/backrest-operator/internal/webhook"
+	"github.com/Reactive-Network/backrest-operator/internal/webhook"
 )
 
 func TestValidateRepository(t *testing.T) {

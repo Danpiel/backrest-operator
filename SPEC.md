@@ -565,7 +565,7 @@ Suggested values (non-exhaustive):
 ```yaml
 operator:
   image:
-    repository: ghcr.io/<github-user>/backrest-operator
+    repository: ghcr.io/reactive-network/backrest-operator
     tag: ""
   watch:
     namespaces: []                     # empty = all
@@ -579,7 +579,7 @@ operator:
 mcp:
   enabled: true
   image:
-    repository: ghcr.io/<github-user>/backrest-mcp
+    repository: ghcr.io/reactive-network/backrest-mcp
     tag: ""
   service:
     type: ClusterIP

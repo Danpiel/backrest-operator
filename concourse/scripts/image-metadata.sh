@@ -4,7 +4,7 @@ set -euo pipefail
 
 git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
 
-OWNER="${GHCR_OWNER:-danpiel}"
+OWNER="${GHCR_OWNER:-reactive-network}"
 OWNER="$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')"
 SHA_SHORT="$(git rev-parse --short=7 HEAD)"
 REF="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --abbrev-ref HEAD)"

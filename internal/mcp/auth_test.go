@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Danpiel/backrest-operator/internal/mcp"
+	"github.com/Reactive-Network/backrest-operator/internal/mcp"
 )
 
 func TestDestructiveToolsSet(t *testing.T) {

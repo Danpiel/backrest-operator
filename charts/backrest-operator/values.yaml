@@ -13,7 +13,7 @@ imagePullSecrets: []
 operator:
   replicaCount: 1
   image:
-    repository: ghcr.io/danpiel/backrest-operator
+    repository: ghcr.io/reactive-network/backrest-operator
     tag: ""
     pullPolicy: IfNotPresent
   logging:
@@ -51,7 +51,7 @@ mcp:
   enabled: true
   replicaCount: 1
   image:
-    repository: ghcr.io/danpiel/backrest-mcp
+    repository: ghcr.io/reactive-network/backrest-mcp
     tag: ""
     pullPolicy: IfNotPresent
   logging:

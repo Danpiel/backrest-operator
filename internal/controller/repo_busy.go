@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
+	operatorv1alpha1 "github.com/Reactive-Network/backrest-operator/api/v1alpha1"
 )
 
 func backupPhaseActive(phase string) bool {

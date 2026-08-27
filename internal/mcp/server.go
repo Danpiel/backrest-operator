@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Danpiel/backrest-operator/internal/logging"
+	"github.com/Reactive-Network/backrest-operator/internal/logging"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 )

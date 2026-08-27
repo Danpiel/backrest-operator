@@ -13,11 +13,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
-	"github.com/Danpiel/backrest-operator/internal/backrest"
-	"github.com/Danpiel/backrest-operator/internal/filters"
-	"github.com/Danpiel/backrest-operator/internal/logging"
-	"github.com/Danpiel/backrest-operator/internal/metrics"
+	operatorv1alpha1 "github.com/Reactive-Network/backrest-operator/api/v1alpha1"
+	"github.com/Reactive-Network/backrest-operator/internal/backrest"
+	"github.com/Reactive-Network/backrest-operator/internal/filters"
+	"github.com/Reactive-Network/backrest-operator/internal/logging"
+	"github.com/Reactive-Network/backrest-operator/internal/metrics"
 )
 
 const annRefreshDownload = "operator.backrest.io/refresh"

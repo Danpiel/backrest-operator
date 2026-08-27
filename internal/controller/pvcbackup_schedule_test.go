@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
+	operatorv1alpha1 "github.com/Reactive-Network/backrest-operator/api/v1alpha1"
 )
 
 func TestScheduleDueSkipsImmediateRetryAfterFailure(t *testing.T) {

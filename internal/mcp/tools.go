@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 
-	"github.com/Danpiel/backrest-operator/internal/backrest"
+	"github.com/Reactive-Network/backrest-operator/internal/backrest"
 )
 
 var (

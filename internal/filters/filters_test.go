@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/Danpiel/backrest-operator/internal/filters"
+	"github.com/Reactive-Network/backrest-operator/internal/filters"
 )
 
 func TestNamespaceAllowedAll(t *testing.T) {

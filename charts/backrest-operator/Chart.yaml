@@ -4,10 +4,10 @@ description: Kubernetes operator for Backrest backup management with MCP integra
 type: application
 version: 0.1.0
 appVersion: "1.14.1"
-home: https://github.com/Danpiel/backrest-operator
+home: https://github.com/Reactive-Network/backrest-operator
 sources:
   - https://github.com/garethgeorge/backrest
-  - https://github.com/Danpiel/backrest-operator
+  - https://github.com/Reactive-Network/backrest-operator
 keywords:
   - backup
   - restic
@@ -17,7 +17,7 @@ keywords:
   - csi
 maintainers:
   - name: Backrest Operator Maintainers
-    url: https://github.com/Danpiel/backrest-operator
+    url: https://github.com/Reactive-Network/backrest-operator
 annotations:
   backrest.upstream.image: ghcr.io/garethgeorge/backrest
   backrest.upstream.tag: v1.14.1

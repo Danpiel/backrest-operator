@@ -1,4 +1,4 @@
-module github.com/Danpiel/backrest-operator
+module github.com/Reactive-Network/backrest-operator
 
 go 1.26.0
 

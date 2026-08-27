@@ -19,11 +19,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	operatorv1alpha1 "github.com/Danpiel/backrest-operator/api/v1alpha1"
-	"github.com/Danpiel/backrest-operator/internal/controller"
-	"github.com/Danpiel/backrest-operator/internal/filters"
-	"github.com/Danpiel/backrest-operator/internal/logging"
-	"github.com/Danpiel/backrest-operator/internal/webhook"
+	operatorv1alpha1 "github.com/Reactive-Network/backrest-operator/api/v1alpha1"
+	"github.com/Reactive-Network/backrest-operator/internal/controller"
+	"github.com/Reactive-Network/backrest-operator/internal/filters"
+	"github.com/Reactive-Network/backrest-operator/internal/logging"
+	"github.com/Reactive-Network/backrest-operator/internal/webhook"
 )
 
 var scheme = runtime.NewScheme()

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Danpiel/backrest-operator/internal/logging"
+	"github.com/Reactive-Network/backrest-operator/internal/logging"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 

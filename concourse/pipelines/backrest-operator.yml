@@ -18,7 +18,7 @@ resources:
     type: git
     icon: github
     source:
-      uri: https://github.com/Danpiel/backrest-operator.git
+      uri: https://github.com/Reactive-Network/backrest-operator.git
       branch: master
       username: ((github-access-token.username))
       password: ((github-access-token.password))
@@ -29,7 +29,7 @@ resources:
     type: git
     icon: github
     source:
-      uri: https://github.com/Danpiel/backrest-operator.git
+      uri: https://github.com/Reactive-Network/backrest-operator.git
       branch: master
       paths:
         - concourse/**
@@ -42,7 +42,7 @@ resources:
     type: git
     icon: github
     source:
-      uri: https://github.com/Danpiel/backrest-operator.git
+      uri: https://github.com/Reactive-Network/backrest-operator.git
       tag_filter: "v*"
       username: ((github-access-token.username))
       password: ((github-access-token.password))
@@ -150,6 +150,7 @@ jobs:
         params:
           GHCR_USERNAME: ((ghcr-credentials.username))
           GHCR_PASSWORD: ((ghcr-credentials.password))
+          GHCR_OWNER: reactive-network
 
   - name: release
     plan:
@@ -169,4 +170,5 @@ jobs:
         params:
           GHCR_USERNAME: ((ghcr-credentials.username))
           GHCR_PASSWORD: ((ghcr-credentials.password))
+          GHCR_OWNER: reactive-network
           GITHUB_TOKEN: ((github-access-token.password))

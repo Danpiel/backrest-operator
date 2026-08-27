@@ -15,8 +15,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/Danpiel/backrest-operator/internal/logging"
-	"github.com/Danpiel/backrest-operator/internal/mcp"
+	"github.com/Reactive-Network/backrest-operator/internal/logging"
+	"github.com/Reactive-Network/backrest-operator/internal/mcp"
 )
 
 var authDenials = prometheus.NewCounterVec(prometheus.CounterOpts{

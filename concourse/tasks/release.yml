@@ -8,6 +8,7 @@ inputs:
 params:
   GHCR_USERNAME: ""
   GHCR_PASSWORD: ""
+  GHCR_OWNER: ""
   GITHUB_TOKEN: ""
   CI_SHARED_DIR: ../ci-shared
 

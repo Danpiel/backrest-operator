@@ -34,9 +34,10 @@ helm registry login ghcr.io -u "${GHCR_USERNAME}" -p "${GHCR_PASSWORD}"
 helm push "${CHART}" "oci://ghcr.io/${OWNER}/charts"
 
 export GH_TOKEN="${GITHUB_TOKEN}"
+GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-Reactive-Network/backrest-operator}"
 VERSION="${REF#v}"
 gh release create "v${VERSION}" \
-  --repo "Danpiel/backrest-operator" \
+  --repo "${GITHUB_REPOSITORY}" \
   --title "Release v${VERSION}" \
   --generate-notes \
   "${CHART}"
