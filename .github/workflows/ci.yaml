@@ -2,9 +2,8 @@ name: ci
 
 # Automatic triggers disabled — CI runs on Concourse (https://ci.prq-infra.net).
 # Re-enable push/pull_request here if rolling back from Concourse.
-on:
-  workflow_dispatch:
-
+'on':
+  workflow_dispatch: {}
 permissions:
   contents: read
 
@@ -32,7 +31,6 @@ jobs:
   publish:
     name: publish images & helm
     needs: [go, helm-lint]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: write
