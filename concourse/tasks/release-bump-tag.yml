@@ -1,0 +1,13 @@
+---
+platform: linux
+inputs:
+  - name: app-git
+outputs:
+  - name: release-meta
+params:
+  GITHUB_TOKEN: ""
+  GITHUB_REPOSITORY: Reactive-Network/backrest-operator
+run:
+  path: bash
+  args: [concourse/scripts/release-bump-tag.sh]
+  dir: app-git

@@ -77,6 +77,7 @@ groups:
   - name: release-flow
     jobs:
       - release
+      - release-manual
 
 jobs:
   - name: set-self
@@ -151,6 +152,7 @@ jobs:
           GHCR_USERNAME: ((ghcr-credentials.username))
           GHCR_PASSWORD: ((ghcr-credentials.password))
           GHCR_OWNER: reactive-network
+          GIT_BRANCH: master
 
   - name: release
     plan:
@@ -167,9 +169,43 @@ jobs:
         file: app-git-concourse/concourse/tasks/release.yml
         input_mapping:
           app-git: app-git-tags
+          pipeline-src: app-git-concourse
           ci-shared: ci-shared
         params:
           GHCR_USERNAME: ((ghcr-credentials.username))
           GHCR_PASSWORD: ((ghcr-credentials.password))
           GHCR_OWNER: reactive-network
           GITHUB_TOKEN: ((github-access-token.password))
+          GIT_BRANCH: master
+
+  - name: release-manual
+    plan:
+      - in_parallel:
+          steps:
+            - get: app-git
+              trigger: false
+            - get: app-git-concourse
+            - get: ci-shared
+              passed: [set-self]
+            - get: builder-image
+      - task: bump-and-push-tag
+        image: builder-image
+        file: app-git-concourse/concourse/tasks/release-bump-tag.yml
+        input_mapping: {app-git: app-git}
+        output_mapping: {release-meta: release-meta}
+        params:
+          GITHUB_TOKEN: ((github-access-token.password))
+      - task: release
+        image: builder-image
+        file: app-git-concourse/concourse/tasks/release-manual-release.yml
+        input_mapping:
+          app-git: app-git
+          pipeline-src: app-git-concourse
+          ci-shared: ci-shared
+          release-meta: release-meta
+        params:
+          GHCR_USERNAME: ((ghcr-credentials.username))
+          GHCR_PASSWORD: ((ghcr-credentials.password))
+          GHCR_OWNER: reactive-network
+          GITHUB_TOKEN: ((github-access-token.password))
+          GIT_BRANCH: master

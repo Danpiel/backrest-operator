@@ -7,9 +7,17 @@ git config --global --add safe.directory "$(pwd)" 2>/dev/null || true
 OWNER="${GHCR_OWNER:-reactive-network}"
 OWNER="$(echo "${OWNER}" | tr '[:upper:]' '[:lower:]')"
 SHA_SHORT="$(git rev-parse --short=7 HEAD)"
-REF="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --abbrev-ref HEAD)"
-if [ "${REF}" = "HEAD" ]; then
-  REF="master"
+if [ -n "${RELEASE_VERSION:-}" ]; then
+  REF="${RELEASE_VERSION}"
+elif tag="$(git describe --tags --exact-match 2>/dev/null)"; then
+  REF="${tag}"
+elif [ -n "${GIT_BRANCH:-}" ]; then
+  REF="${GIT_BRANCH}"
+else
+  REF="$(git rev-parse --abbrev-ref HEAD)"
+  if [ "${REF}" = "HEAD" ]; then
+    REF="master"
+  fi
 fi
 
 IS_RELEASE=false

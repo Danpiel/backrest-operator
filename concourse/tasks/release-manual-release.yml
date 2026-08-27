@@ -1,21 +1,19 @@
 ---
 platform: linux
-
 inputs:
   - name: app-git
   - name: pipeline-src
   - name: ci-shared
-
+  - name: release-meta
 params:
   GHCR_USERNAME: ""
   GHCR_PASSWORD: ""
-  GHCR_OWNER: ""
+  GHCR_OWNER: reactive-network
   GITHUB_TOKEN: ""
-  GIT_BRANCH: ""
+  GITHUB_REPOSITORY: Reactive-Network/backrest-operator
+  GIT_BRANCH: master
   CI_SHARED_DIR: ../ci-shared
-
 run:
   path: bash
-  args:
-    - ../pipeline-src/concourse/scripts/release.sh
+  args: [../pipeline-src/concourse/scripts/release-manual-release.sh]
   dir: app-git

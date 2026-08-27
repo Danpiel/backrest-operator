@@ -9,6 +9,7 @@ params:
   GHCR_USERNAME: ""
   GHCR_PASSWORD: ""
   GHCR_OWNER: ""
+  GIT_BRANCH: ""
   CI_SHARED_DIR: ../ci-shared
 
 run:
