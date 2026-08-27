@@ -3,15 +3,11 @@ platform: linux
 
 inputs:
   - name: app-git
-  - name: ci-config
 
 caches:
   - path: cache/gomod
   - path: cache/gocache
   - path: cache/gobin
-
-params:
-  CI_CONFIG_DIR: ../ci-config
 
 run:
   path: bash

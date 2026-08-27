@@ -2,16 +2,16 @@
 # Build and push operator + MCP images via remote BuildKit.
 set -euo pipefail
 
-CI_CONFIG_DIR="${CI_CONFIG_DIR:-../ci-config}"
-if [ ! -f "${CI_CONFIG_DIR}/concourse/scripts/buildkit-remote.sh" ]; then
-  echo "CI_CONFIG_DIR must point at infra concourse/ checkout" >&2
+CI_SHARED_DIR="${CI_SHARED_DIR:-../ci-shared}"
+if [ ! -f "${CI_SHARED_DIR}/concourse/scripts/buildkit-remote.sh" ]; then
+  echo "CI_SHARED_DIR must point at Reactive-Network/ci checkout" >&2
   exit 1
 fi
 
 # shellcheck source=image-metadata.sh
 source "$(dirname "$0")/image-metadata.sh"
 # shellcheck source=buildkit-remote.sh
-source "${CI_CONFIG_DIR}/concourse/scripts/buildkit-remote.sh"
+source "${CI_SHARED_DIR}/concourse/scripts/buildkit-remote.sh"
 
 buildkit_build_dockerfile() {
   local cache_repo="$1"
