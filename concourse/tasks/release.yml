@@ -3,13 +3,13 @@ platform: linux
 
 inputs:
   - name: app-git
-  - name: ci-config
+  - name: ci-shared
 
 params:
   GHCR_USERNAME: ""
   GHCR_PASSWORD: ""
   GITHUB_TOKEN: ""
-  CI_CONFIG_DIR: ../ci-config
+  CI_SHARED_DIR: ../ci-shared
 
 run:
   path: bash

@@ -2,9 +2,6 @@
 # Tag release: test, images, Helm OCI chart, GitHub Release.
 set -euo pipefail
 
-CI_CONFIG_DIR="${CI_CONFIG_DIR:-../ci-config}"
-export CI_CONFIG_DIR
-
 bash concourse/scripts/unit-test.sh
 bash concourse/scripts/helm-lint.sh
 
@@ -19,7 +16,7 @@ fi
 bash concourse/scripts/build-images.sh
 
 # shellcheck source=ensure-gh.sh
-source "${CI_CONFIG_DIR}/concourse/scripts/ensure-gh.sh"
+source "$(dirname "$0")/ensure-gh.sh"
 
 if ! command -v helm >/dev/null 2>&1; then
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash

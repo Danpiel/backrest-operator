@@ -11,9 +11,8 @@ mkdir -p "${GOMODCACHE}" "${GOCACHE}" "${GOPATH}"
 
 git config --global --add safe.directory "$(pwd)"
 
-CI_CONFIG_DIR="${CI_CONFIG_DIR:-../ci-config}"
 # shellcheck source=ensure-go.sh
-source "${CI_CONFIG_DIR}/concourse/scripts/ensure-go.sh"
+source "$(dirname "$0")/ensure-go.sh"
 
 go test ./...
 go vet ./...
