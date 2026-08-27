@@ -1,5 +1,5 @@
 ---
-# Concourse pipeline for backrest-operator (no inject-slack-notifications).
+# Source pipeline (no Slack hooks). Hooks injected from Reactive-Network/ci via render-and-validate.
 
 resources:
   - name: ci-shared
@@ -84,19 +84,21 @@ jobs:
           - get: app-git
             trigger: true
           - get: ci-shared
-          - get: ci-config
-      - set_pipeline: self
-        file: app-git/concourse/pipelines/backrest-operator.yml
-    on_failure:
-      try:
-        task: slack-notify
-        file: ci-shared/concourse/tasks/slack-notify.yml
+            trigger: true
+      - task: render-and-validate
+        file: ci-shared/concourse/tasks/render-and-validate.yml
+        input_mapping:
+          pipeline-src: app-git
+          ci-shared: ci-shared
+        output_mapping:
+          rendered: rendered
         params:
-          SLACK_TOKEN: ((slack-ci.token))
-          SLACK_CHANNEL: ((slack-ci.channel))
-          ALERT_TYPE: failed
           PIPELINE_NAME: backrest-operator
-          JOB_NAME: set-self
+          PIPELINE_SRC_PATH: pipeline-src/concourse/pipelines/backrest-operator.yml
+          VARS_FILE: pipeline-src/concourse/vars/sample.yml
+          CI_RESOURCE: ci-shared
+      - set_pipeline: self
+        file: rendered/pipeline.yml
 
   - name: unit-test
     plan:
@@ -109,42 +111,12 @@ jobs:
             - get: ci-shared
               passed: [set-self]
             - get: builder-image
-      - try:
-          task: slack-notify
-          file: ci-shared/concourse/tasks/slack-notify.yml
-          params:
-            SLACK_TOKEN: ((slack-ci.token))
-            SLACK_CHANNEL: ((slack-ci.channel))
-            ALERT_TYPE: started
-            PIPELINE_NAME: backrest-operator
-            JOB_NAME: unit-test
-      - do:
-          - task: unit-test
-            image: builder-image
-            file: app-git/concourse/tasks/unit-test.yml
-            input_mapping:
-              app-git: app-git
-              ci-config: ci-config
-        on_success:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: success
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: unit-test
-        on_failure:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: failed
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: unit-test
+      - task: unit-test
+        image: builder-image
+        file: app-git/concourse/tasks/unit-test.yml
+        input_mapping:
+          app-git: app-git
+          ci-config: ci-config
 
   - name: helm-lint
     plan:
@@ -157,41 +129,11 @@ jobs:
             - get: ci-shared
               passed: [set-self]
             - get: deployer-image
-      - try:
-          task: slack-notify
-          file: ci-shared/concourse/tasks/slack-notify.yml
-          params:
-            SLACK_TOKEN: ((slack-ci.token))
-            SLACK_CHANNEL: ((slack-ci.channel))
-            ALERT_TYPE: started
-            PIPELINE_NAME: backrest-operator
-            JOB_NAME: helm-lint
-      - do:
-          - task: helm-lint
-            image: deployer-image
-            file: app-git/concourse/tasks/helm-lint.yml
-            input_mapping:
-              app-git: app-git
-        on_success:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: success
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: helm-lint
-        on_failure:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: failed
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: helm-lint
+      - task: helm-lint
+        image: deployer-image
+        file: app-git/concourse/tasks/helm-lint.yml
+        input_mapping:
+          app-git: app-git
 
   - name: build-images
     plan:
@@ -205,45 +147,15 @@ jobs:
             - get: ci-shared
               passed: [set-self]
             - get: builder-image
-      - try:
-          task: slack-notify
-          file: ci-shared/concourse/tasks/slack-notify.yml
-          params:
-            SLACK_TOKEN: ((slack-ci.token))
-            SLACK_CHANNEL: ((slack-ci.channel))
-            ALERT_TYPE: started
-            PIPELINE_NAME: backrest-operator
-            JOB_NAME: build-images
-      - do:
-          - task: build-images
-            image: builder-image
-            file: app-git/concourse/tasks/build-images.yml
-            input_mapping:
-              app-git: app-git
-              ci-config: ci-config
-            params:
-              GHCR_USERNAME: ((ghcr-credentials.username))
-              GHCR_PASSWORD: ((ghcr-credentials.password))
-        on_success:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: success
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: build-images
-        on_failure:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: failed
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: build-images
+      - task: build-images
+        image: builder-image
+        file: app-git/concourse/tasks/build-images.yml
+        input_mapping:
+          app-git: app-git
+          ci-config: ci-config
+        params:
+          GHCR_USERNAME: ((ghcr-credentials.username))
+          GHCR_PASSWORD: ((ghcr-credentials.password))
 
   - name: release
     plan:
@@ -256,43 +168,13 @@ jobs:
             - get: ci-shared
               passed: [set-self]
             - get: builder-image
-      - try:
-          task: slack-notify
-          file: ci-shared/concourse/tasks/slack-notify.yml
-          params:
-            SLACK_TOKEN: ((slack-ci.token))
-            SLACK_CHANNEL: ((slack-ci.channel))
-            ALERT_TYPE: started
-            PIPELINE_NAME: backrest-operator
-            JOB_NAME: release
-      - do:
-          - task: release
-            image: builder-image
-            file: app-git/concourse/tasks/release.yml
-            input_mapping:
-              app-git: app-git-tags
-              ci-config: ci-config
-            params:
-              GHCR_USERNAME: ((ghcr-credentials.username))
-              GHCR_PASSWORD: ((ghcr-credentials.password))
-              GITHUB_TOKEN: ((github-access-token.password))
-        on_success:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: success
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: release
-        on_failure:
-          try:
-            task: slack-notify
-            file: ci-shared/concourse/tasks/slack-notify.yml
-            params:
-              SLACK_TOKEN: ((slack-ci.token))
-              SLACK_CHANNEL: ((slack-ci.channel))
-              ALERT_TYPE: failed
-              PIPELINE_NAME: backrest-operator
-              JOB_NAME: release
+      - task: release
+        image: builder-image
+        file: app-git/concourse/tasks/release.yml
+        input_mapping:
+          app-git: app-git-tags
+          ci-config: ci-config
+        params:
+          GHCR_USERNAME: ((ghcr-credentials.username))
+          GHCR_PASSWORD: ((ghcr-credentials.password))
+          GITHUB_TOKEN: ((github-access-token.password))

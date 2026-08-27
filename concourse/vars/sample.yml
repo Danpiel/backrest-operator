@@ -11,6 +11,5 @@ ghcr-credentials:
 webhook-token-backrest-operator: CHANGE_ME
 webhook-token-backrest-operator-tags: CHANGE_ME
 
-slack-ci:
-  token: CHANGE_ME
-  channel: ci
+slack-notify:
+  secret: CHANGE_ME
