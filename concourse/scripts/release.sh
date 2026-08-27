@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Tag release: test, images, Helm OCI chart, GitHub Release.
+# Scripts from pipeline-src; git tree is cwd (tag checkout, dir: app-git).
 set -euo pipefail
 
-bash concourse/scripts/unit-test.sh
-bash concourse/scripts/helm-lint.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+bash "${SCRIPT_DIR}/unit-test.sh"
+bash "${SCRIPT_DIR}/helm-lint.sh"
 
 # shellcheck source=image-metadata.sh
-source "$(dirname "$0")/image-metadata.sh"
+source "${SCRIPT_DIR}/image-metadata.sh"
 
 if [ "${IS_RELEASE}" != "true" ]; then
   echo "ERROR: release job requires a v* tag checkout" >&2
   exit 1
 fi
 
-bash concourse/scripts/build-images.sh
+bash "${SCRIPT_DIR}/build-images.sh"
 
 # shellcheck source=ensure-gh.sh
-source "$(dirname "$0")/ensure-gh.sh"
+source "${SCRIPT_DIR}/ensure-gh.sh"
 
 if ! command -v helm >/dev/null 2>&1; then
   curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash

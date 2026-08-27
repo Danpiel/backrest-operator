@@ -11,4 +11,4 @@ if [ -z "${RELEASE_VERSION:-}" ]; then
   export RELEASE_VERSION
 fi
 
-exec bash concourse/scripts/release.sh
+exec bash "$(dirname "$0")/release.sh"
